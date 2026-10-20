@@ -199,4 +199,103 @@ describe('GET /api/flows/cron', () => {
     const body = (await res.json()) as { swept: number }
     expect(body).toEqual({ swept: 0 })
   })
+
+  it('rejects Supabase Studio dashboard URLs with 500 and INVALID_SUPABASE_URL', async () => {
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://supabase.com/dashboard/project/jujyepvlmuraqutnsvcm/settings/api'
+
+    const req = new Request('http://localhost/api/flows/cron', {
+      method: 'GET',
+      headers: { 'x-cron-secret': SECRET },
+    })
+
+    const res = await GET(req)
+    expect(res.status).toBe(500)
+    expect(res.headers.get('x-cron-error-step')).toBe('env_validation')
+    expect(res.headers.get('x-cron-error-code')).toBe('INVALID_SUPABASE_URL')
+    expect(res.headers.get('x-cron-error-message')).toContain('received Supabase Studio / Dashboard URL instead of a project API URL')
+
+    const body = (await res.json()) as { error: string; code: string; message: string }
+    expect(body.code).toBe('INVALID_SUPABASE_URL')
+    expect(body.message).toContain('received Supabase Studio / Dashboard URL instead of a project API URL')
+  })
+
+  it('fails with 500 when Supabase URL is malformed', async () => {
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'not-a-valid-url'
+
+    const req = new Request('http://localhost/api/flows/cron', {
+      method: 'GET',
+      headers: { 'x-cron-secret': SECRET },
+    })
+
+    const res = await GET(req)
+    expect(res.status).toBe(500)
+    expect(res.headers.get('x-cron-error-step')).toBe('env_validation')
+    expect(res.headers.get('x-cron-error-code')).toBe('INVALID_SUPABASE_URL')
+    const body = (await res.json()) as { error: string; code: string; message: string }
+    expect(body.code).toBe('INVALID_SUPABASE_URL')
+  })
+
+  it('fails with 500 when Supabase URL is an unrelated HTTPS host', async () => {
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://example.com'
+
+    const req = new Request('http://localhost/api/flows/cron', {
+      method: 'GET',
+      headers: { 'x-cron-secret': SECRET },
+    })
+
+    const res = await GET(req)
+    expect(res.status).toBe(500)
+    expect(res.headers.get('x-cron-error-step')).toBe('env_validation')
+    expect(res.headers.get('x-cron-error-code')).toBe('INVALID_SUPABASE_URL')
+    expect(res.headers.get('x-cron-error-message')).toContain('unexpected host')
+    const body = (await res.json()) as { error: string; code: string; message: string }
+    expect(body.code).toBe('INVALID_SUPABASE_URL')
+    expect(body.message).toContain('unexpected host')
+  })
+
+  it('succeeds when Supabase URL has quotes or whitespace around valid API endpoint', async () => {
+    process.env.NEXT_PUBLIC_SUPABASE_URL = '  "https://jujyepvlmuraqutnsvcm.supabase.co/"  '
+
+    const req = new Request('http://localhost/api/flows/cron', {
+      method: 'GET',
+      headers: { 'x-cron-secret': SECRET },
+    })
+
+    const res = await GET(req)
+    expect(res.status).toBe(200)
+  })
+
+  it('detects HTML responses from Supabase Studio and maps to HTML_NOT_JSON code and clean message', async () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const htmlPayload = '<!DOCTYPE html><html><head><title>Supabase Studio</title></head><body>Dashboard</body></html>'
+    const queryChain: Record<string, unknown> = {}
+    queryChain.select = vi.fn().mockReturnValue(queryChain)
+    queryChain.eq = vi.fn().mockResolvedValue({
+      data: null,
+      error: { message: htmlPayload },
+    })
+
+    mocks.supabaseAdmin.mockReturnValue({
+      from: vi.fn().mockReturnValue(queryChain),
+    })
+
+    const req = new Request('http://localhost/api/flows/cron', {
+      method: 'GET',
+      headers: { 'x-cron-secret': SECRET },
+    })
+
+    const res = await GET(req)
+    expect(res.status).toBe(500)
+    expect(res.headers.get('x-cron-error-step')).toBe('active_run_scan')
+    expect(res.headers.get('x-cron-error-code')).toBe('HTML_NOT_JSON')
+    expect(res.headers.get('x-cron-error-message')).not.toContain('<!DOCTYPE')
+    expect(res.headers.get('x-cron-error-message')).toContain('Received HTML document instead of JSON API response')
+
+    const body = (await res.json()) as { error: string; code: string; message: string }
+    expect(body.code).toBe('HTML_NOT_JSON')
+    expect(body.message).toContain('Verify NEXT_PUBLIC_SUPABASE_URL is an API endpoint')
+
+    consoleSpy.mockRestore()
+  })
 })

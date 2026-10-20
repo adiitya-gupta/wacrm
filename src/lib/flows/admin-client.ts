@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
+import { normalizeSupabaseUrl } from '@/lib/supabase/normalize-url'
 
 // Lazy, shared service-role client for the Flows engine.
 // Mirrors src/lib/automations/admin-client.ts — same shape so anyone
@@ -9,8 +10,8 @@ export function supabaseAdmin(): SupabaseClient {
   if (!_adminClient) {
     const rawUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL
     const rawKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY
-    const url = rawUrl?.trim().replace(/^["']|["']$/g, '')
-    const key = rawKey?.trim().replace(/^["']|["']$/g, '')
+    const url = normalizeSupabaseUrl(rawUrl)
+    const key = rawKey?.trim().replace(/^["']|["']$/g, '').trim()
 
     if (!url || !key) {
       const missing = [

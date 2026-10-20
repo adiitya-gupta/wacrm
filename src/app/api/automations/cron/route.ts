@@ -3,6 +3,7 @@ import { supabaseAdmin } from '@/lib/automations/admin-client'
 import { expireAwaitingReplies, resumePendingExecution } from '@/lib/automations/engine'
 import type { AutomationContext } from '@/lib/automations/engine'
 import { authenticateCronRequest } from '@/lib/cron/auth'
+import { normalizeSupabaseUrl } from '@/lib/supabase/normalize-url'
 
 interface ErrorWithPostgrestFields {
   code?: string
@@ -20,21 +21,23 @@ interface ErrorWithPostgrestFields {
  *    monitoring flags it as a true serverless exception.
  * 3. Diagnostic response headers (`x-cron-error-step`, `x-cron-error-code`, `x-cron-error-message`)
  *    that appear directly in Vercel's Request Inspector panel.
- * 4. Never logs or leaks secrets, authorization tokens, or customer data.
+ * 4. Detects upstream HTML payloads (e.g. from Supabase Studio dashboard URLs) and normalizes them
+ *    to safe, descriptive error codes without logging or leaking raw HTML or secrets.
+ * 5. Never logs or leaks secrets, authorization tokens, or customer data.
  */
 function cronErrorResponse(
   status: number,
   step: string,
   error: ErrorWithPostgrestFields | Error | string,
 ) {
-  const code =
+  let code =
     typeof error === 'object' && 'code' in error && error.code
       ? String(error.code)
       : error instanceof Error
         ? error.name || 'ERROR'
         : 'ERROR'
 
-  const message =
+  let message =
     typeof error === 'string'
       ? error
       : error instanceof Error
@@ -44,11 +47,28 @@ function cronErrorResponse(
   const details = typeof error === 'object' && 'details' in error ? error.details : undefined
   const hint = typeof error === 'object' && 'hint' in error ? error.hint : undefined
 
+  // Detect HTML responses from Supabase Studio / Dashboard or proxy
+  const isHtml =
+    message.trim().startsWith('<!DOCTYPE') ||
+    message.trim().startsWith('<!doctype') ||
+    message.trim().startsWith('<html') ||
+    /<(?:title|head|body|div)[\s>]/i.test(message)
+
+  if (isHtml) {
+    code = 'HTML_NOT_JSON'
+    message =
+      'Received HTML document instead of JSON API response. Verify NEXT_PUBLIC_SUPABASE_URL is an API endpoint (https://<project-ref>.supabase.co), not a Supabase Studio / Dashboard URL.'
+  }
+
   const logMessage = `[automations-cron] [${step}] [${code}]: ${message}`
   console.error(logMessage, { details, hint })
   console.error(new Error(logMessage))
 
-  const sanitizedHeaderMessage = message.slice(0, 200).replace(/[\r\n]+/g, ' ')
+  const sanitizedHeaderMessage = message
+    .slice(0, 200)
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/[^\x20-\x7E]/g, ' ')
+    .trim()
 
   return NextResponse.json(
     {
@@ -90,8 +110,20 @@ export async function GET(request: Request) {
   // Pre-flight check: ensure required Supabase credentials exist in the environment
   const rawUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL
   const rawKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY
-  const hasUrl = Boolean(rawUrl?.trim())
-  const hasServiceKey = Boolean(rawKey?.trim())
+
+  let url = ''
+  try {
+    url = normalizeSupabaseUrl(rawUrl)
+  } catch (urlErr) {
+    return cronErrorResponse(500, 'env_validation', {
+      code: 'INVALID_SUPABASE_URL',
+      message: urlErr instanceof Error ? urlErr.message : String(urlErr),
+    })
+  }
+
+  const key = rawKey?.trim().replace(/^["']|["']$/g, '').trim()
+  const hasUrl = Boolean(url)
+  const hasServiceKey = Boolean(key)
 
   if (!hasUrl || !hasServiceKey) {
     const missing = [

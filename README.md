@@ -92,10 +92,31 @@ Wattomation is optimized for deployment on **Vercel** with **Supabase**.
    - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
    - `SUPABASE_SERVICE_ROLE_KEY`
    - `ENCRYPTION_KEY` (64 hex characters)
-   - `CRON_SECRET`
+   - `AUTOMATION_CRON_SECRET` (generate a secure random 32-byte secret)
    - `PLATFORM_ADMIN_EMAILS`
    - `UPSTASH_REDIS_REST_URL` & `UPSTASH_REDIS_REST_TOKEN`
-4. Deploy the project. Vercel automatically configures the scheduled cron jobs defined in `vercel.json`.
+4. Deploy the project on Vercel.
+
+### Scheduling Automations & Flows (Vercel Hobby & External Schedulers)
+
+Vercel Hobby accounts do not permit sub-daily cron jobs (such as `* * * * *`). To preserve 1-minute execution fidelity for timed WhatsApp follow-ups and flow sweeps without requiring Vercel Pro, configure a free external scheduler (e.g. [cron-job.org](https://cron-job.org), Upstash QStash, or your server's crontab) to trigger the two cron endpoints via HTTP `GET`:
+
+1. **Automations Pending Executions Runner**:
+   - **Method**: `GET`
+   - **URL**: `https://<your-deployment-domain>/api/automations/cron`
+   - **HTTP Header**: `x-cron-secret: <AUTOMATION_CRON_SECRET>`
+   - **Frequency**: Every minute (`* * * * *`)
+   - **Purpose**: Drains due delay/wait steps in WhatsApp automations and expires lapsed reply deadlines.
+
+2. **Flows Stale Run Sweeper**:
+   - **Method**: `GET`
+   - **URL**: `https://<your-deployment-domain>/api/flows/cron`
+   - **HTTP Header**: `x-cron-secret: <AUTOMATION_CRON_SECRET>`
+   - **Frequency**: Every minute or every 5 minutes (`*/5 * * * *`)
+   - **Purpose**: Sweeps abandoned interactive flows past their timeout (default 24h) and frees contacts to start new flows.
+
+> [!SECURITY]
+> **Security Requirement**: Always pass the secret securely in the `x-cron-secret` HTTP header (or `Authorization: Bearer <secret>`). Never pass the secret in URL query parameters, client-side code, or commit it to Git.
 
 ---
 

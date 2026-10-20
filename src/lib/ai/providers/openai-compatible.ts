@@ -75,7 +75,7 @@ export function normalizeOpenAiCompatibleBaseUrl(baseUrl: string): string {
   }
 
   const normalized = parsed.toString().replace(/\/+$/, '')
-  return normalized.endsWith('/chat/completions')
+  return normalized.endsWith('/chat/completions') || normalized.includes('/ai/run')
     ? normalized
     : `${normalized}/chat/completions`
 }
@@ -86,6 +86,10 @@ interface OpenAiCompatibleResponse {
     prompt_tokens?: number
     completion_tokens?: number
     total_tokens?: number
+  }
+  result?: {
+    choices?: { message?: { content?: string } }[]
+    response?: string
   }
 }
 
@@ -133,8 +137,13 @@ export async function generateOpenAiCompatible(
 
   if (!res.ok) throw await providerHttpError('OpenAI-compatible provider', res)
 
-  const data = (await res.json().catch(() => null)) as OpenAiCompatibleResponse | null
-  const text = data?.choices?.[0]?.message?.content
+  const rawJson = (await res.json().catch(() => null)) as (OpenAiCompatibleResponse & { result?: Record<string, unknown> }) | null
+  const data = (rawJson?.result && typeof rawJson.result === 'object' ? rawJson.result : rawJson) as OpenAiCompatibleResponse | null
+  const text =
+    data?.choices?.[0]?.message?.content ||
+    (typeof (rawJson?.result as { response?: unknown })?.response === 'string'
+      ? (rawJson?.result as { response: string }).response
+      : null)
   if (!text || typeof text !== 'string' || !text.trim()) {
     throw new AiError(t('ai.emptyResponse', { provider: 'OpenAI-compatible provider' }), {
       code: 'empty_response',

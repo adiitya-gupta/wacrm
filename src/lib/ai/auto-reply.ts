@@ -7,12 +7,15 @@ import { buildSystemPrompt } from './defaults'
 import { buildHandoffSummary } from './handoff'
 import { logAiUsage } from './usage'
 import { latestUserMessage } from './query'
+import type { AiUsage } from './types'
 import {
   engineSendText,
   loadAccountMetaCredentials,
 } from '@/lib/flows/meta-send'
 import { sendTypingIndicator } from '@/lib/whatsapp/meta-api'
 import { checkRateLimit, RATE_LIMITS } from '@/lib/rate-limit'
+import { checkAccountQuota, incrementAccountUsage } from '@/lib/billing/quota'
+import { processOpsiysLeadConversation } from './opsiys-agent'
 
 interface DispatchArgs {
   /** Tenancy key — drives config, contact, and whatsapp_config lookups. */
@@ -46,7 +49,19 @@ interface DispatchArgs {
  * The 24h WhatsApp session window is inherently open here — we're
  * reacting to a customer message that just landed — so no separate
  * window check is needed.
+/**
+ * Check whether the given account is the official OPSIYS account.
+ * The consultative OPSIYS sales persona and agency pitch run ONLY for the
+ * official OPSIYS account (configured via OPSIYS_ACCOUNT_ID).
+ * Every other paying tenant generates replies using their own business
+ * instructions, knowledge base documents, and model settings.
  */
+export function isOpsiysAccount(accountId: string): boolean {
+  const configured = process.env.OPSIYS_ACCOUNT_ID?.trim()
+  if (!configured) return false
+  return accountId === configured
+}
+
 export async function dispatchInboundToAiReply(
   args: DispatchArgs,
 ): Promise<void> {
@@ -101,13 +116,22 @@ export async function dispatchInboundToAiReply(
     // marketing blast landing 200 replies at once) so we never run the
     // owner's key past the provider's rate limit. Over the limit → skip
     // the auto-reply; the inbound still sits in the inbox for a human.
-    const acctLimit = checkRateLimit(
+    const acctLimit = await checkRateLimit(
       `ai-autoreply:${accountId}`,
       RATE_LIMITS.aiAutoReplyAccount,
     )
     if (!acctLimit.success) {
       console.warn(
         `[ai auto-reply] account ${accountId} hit the per-account rate limit — skipping this inbound.`,
+      )
+      return
+    }
+
+    // Check account AI token quota
+    const tokenQuota = await checkAccountQuota(db, accountId, 'ai_tokens')
+    if (!tokenQuota.allowed) {
+      console.warn(
+        `[ai auto-reply] account ${accountId} exceeded AI token quota: ${tokenQuota.reason}`,
       )
       return
     }
@@ -136,11 +160,64 @@ export async function dispatchInboundToAiReply(
       knowledge,
     })
 
-    const { text, handoff, usage } = await generateReply({
-      config,
-      systemPrompt,
-      messages,
-    })
+    // Fetch contact details for personalized greeting and booking context
+    let contactRow: { name?: string | null; phone?: string | null } | null = null
+    try {
+      const { data } = await db
+        .from('contacts')
+        .select('name, phone')
+        .eq('id', contactId)
+        .maybeSingle()
+      contactRow = data
+    } catch {
+      // Best-effort
+    }
+
+    let text = ''
+    let handoff = false
+    let usage: AiUsage | null = null
+
+    if (isOpsiysAccount(accountId)) {
+      try {
+        const opsiysResult = await processOpsiysLeadConversation({
+          db,
+          accountId,
+          conversationId,
+          contactId,
+          messages,
+          config: {
+            ...config,
+            systemPrompt,
+          },
+          contactName: contactRow?.name || null,
+          contactPhone: contactRow?.phone || null,
+        })
+        text = opsiysResult.text
+        handoff = opsiysResult.handoff
+      } catch (opsiysErr) {
+        console.warn('[ai auto-reply] OPSIYS agent fallback to standard generation:', opsiysErr)
+        const gen = await generateReply({
+          config,
+          systemPrompt,
+          messages,
+        })
+        text = gen.text
+        handoff = gen.handoff
+        usage = gen.usage
+      }
+    } else {
+      // Standard multi-tenant generation: Grounded exclusively in this tenant's
+      // custom business systemPrompt, verified knowledge-base excerpts, and BYO provider config.
+      // Never uses OPSIYS branding, services, or calendar booking.
+      const gen = await generateReply({
+        config,
+        systemPrompt,
+        messages,
+      })
+      text = gen.text
+      handoff = gen.handoff
+      usage = gen.usage
+    }
 
     // Record token spend on the account's BYO key. Fire-and-forget so it
     // never adds latency to the customer-facing send: `logAiUsage`
@@ -155,6 +232,12 @@ export async function dispatchInboundToAiReply(
       model: config.model,
       usage,
     })
+
+    if (usage) {
+      void incrementAccountUsage(db, accountId, {
+        aiTokens: (usage.promptTokens || 0) + (usage.completionTokens || 0),
+      })
+    }
 
     if (handoff || !text) {
       // The model can't (or shouldn't) answer — stop auto-replying on

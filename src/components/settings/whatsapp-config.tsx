@@ -585,12 +585,12 @@ export function WhatsAppConfig() {
 
         {/* Last save failed — why, which field, and what to quote to Meta */}
         {saveFailure && (
-          <Alert className="bg-red-950/30 border-red-700/50">
+          <Alert className="bg-[#FEE2E2] border-[#FECACA]">
             <div className="flex items-start gap-3">
-              <XCircle className="size-5 text-red-400 mt-0.5 shrink-0" />
+              <XCircle className="size-5 text-[#B91C1C] mt-0.5 shrink-0" />
               <div className="flex-1 min-w-0">
-                <AlertTitle className="text-red-200 mb-1">{t('lastSaveFailed')}</AlertTitle>
-                <AlertDescription className="text-red-100/80 text-sm">
+                <AlertTitle className="text-[#B91C1C] font-semibold mb-1">{t('lastSaveFailed')}</AlertTitle>
+                <AlertDescription className="text-[#B91C1C]/90 text-sm">
                   {saveFailure.message}
                 </AlertDescription>
                 {saveFailure.meta && renderMetaDetails(saveFailure.meta)}
@@ -645,20 +645,20 @@ export function WhatsAppConfig() {
           <Alert
             className={
               isRegistered
-                ? 'bg-emerald-950/30 border-emerald-700/50'
-                : 'bg-amber-950/30 border-amber-700/50'
+                ? 'bg-[#DCFCE7] border-[#BBF7D0]'
+                : 'bg-[#FEF3C7] border-[#FDE68A]'
             }
           >
             <div className="flex items-center justify-between gap-2 flex-wrap">
               <div className="flex items-center gap-2">
                 {isRegistered ? (
-                  <CheckCircle2 className="size-4 text-emerald-400" />
+                  <CheckCircle2 className="size-4 text-[#15803D]" />
                 ) : (
-                  <AlertTriangle className="size-4 text-amber-400" />
+                  <AlertTriangle className="size-4 text-[#B45309]" />
                 )}
                 <AlertTitle
                   className={
-                    'mb-0 ' + (isRegistered ? 'text-emerald-200' : 'text-amber-200')
+                    'mb-0 font-semibold ' + (isRegistered ? 'text-[#15803D]' : 'text-[#B45309]')
                   }
                 >
                   {isRegistered
@@ -671,7 +671,7 @@ export function WhatsAppConfig() {
                 size="sm"
                 onClick={handleVerifyRegistration}
                 disabled={verifyingRegistration}
-                className="border-border bg-transparent text-foreground hover:bg-muted h-7"
+                className="border-border bg-card text-foreground hover:bg-muted h-7 shadow-xs"
               >
                 {verifyingRegistration ? (
                   <Loader2 className="size-3.5 animate-spin" />
@@ -681,7 +681,7 @@ export function WhatsAppConfig() {
                 {t('verifyWithMeta')}
               </Button>
             </div>
-            <AlertDescription className="text-muted-foreground mt-2 text-xs leading-relaxed">
+            <AlertDescription className="text-secondary-text mt-2 text-xs leading-relaxed">
               {isRegistered ? (
                 <span
                   dangerouslySetInnerHTML={{
@@ -695,7 +695,7 @@ export function WhatsAppConfig() {
               ) : lastRegistrationError ? (
                 <>
                   {t('lastAttemptFailed')}
-                  <span className="text-red-300">
+                  <span className="text-[#B91C1C] font-medium">
                     &quot;{lastRegistrationError}&quot;
                   </span>
                   . {t('retryHint')}
@@ -706,20 +706,20 @@ export function WhatsAppConfig() {
             </AlertDescription>
 
             {registrationProbe && (
-              <div className="mt-3 rounded border border-border bg-card/60 px-3 py-2 space-y-1.5 text-[11px]">
+              <div className="mt-3 rounded border border-border bg-card px-3 py-2 space-y-1.5 text-[11px] shadow-xs">
                 <p className="font-medium text-foreground">
-                  {t('diagnosticLastRun')}
-                  <span className={registrationProbe.live ? 'text-emerald-400' : 'text-amber-400'}>
+                  {t('diagnosticLastRun')}{' '}
+                  <span className={registrationProbe.live ? 'text-[#15803D] font-semibold' : 'text-[#B45309] font-semibold'}>
                     {registrationProbe.live ? t('live') : t('notLive')}
                   </span>
                 </p>
-                <ul className="space-y-0.5 text-muted-foreground">
+                <ul className="space-y-0.5 text-secondary-text">
                   {Object.entries(registrationProbe.checks).map(([k, v]) => (
                     <li key={k} className="flex items-center gap-1.5">
                       {v === true ? (
-                        <CheckCircle2 className="size-3 text-emerald-400 shrink-0" />
+                        <CheckCircle2 className="size-3 text-[#15803D] shrink-0" />
                       ) : v === false ? (
-                        <XCircle className="size-3 text-red-400 shrink-0" />
+                        <XCircle className="size-3 text-[#B91C1C] shrink-0" />
                       ) : (
                         <span className="size-3 rounded-full border border-border shrink-0" />
                       )}
@@ -728,7 +728,7 @@ export function WhatsAppConfig() {
                   ))}
                 </ul>
                 {(registrationProbe.errors ?? []).length > 0 && (
-                  <ul className="pt-1 space-y-0.5 text-red-300">
+                  <ul className="pt-1 space-y-0.5 text-[#B91C1C]">
                     {registrationProbe.errors?.map((e, i) => (
                       <li key={i}>• {e}</li>
                     ))}

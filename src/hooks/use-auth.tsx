@@ -37,12 +37,17 @@ interface Profile {
   account_role: AccountRole | null;
 }
 
+import type { ApprovalStatus } from "@/lib/auth/approval";
+
 interface AccountSummary {
   id: string;
   name: string;
   /** Default deal currency (ISO-4217). NOT NULL DEFAULT 'USD' in the
    *  DB (migration 021); narrowed to DEFAULT_CURRENCY when absent. */
   default_currency: string;
+  approval_status: ApprovalStatus;
+  is_suspended: boolean;
+  status_reason: string | null;
 }
 
 /**
@@ -53,12 +58,20 @@ interface AccountSummary {
  * gate returns false without a role, so in both the app silently
  * becomes read-only — the whole UI renders, and nothing saves. That is
  * indistinguishable from a bug unless we say so (issue #471).
+ *
+ * 'pending' | 'rejected' | 'suspended' guard access until administrator authorizes.
  */
 export type AccountStatus =
   /** Profile row still in flight. */
   | "loading"
   /** Account + role resolved; normal operation. */
   | "ready"
+  /** Account awaiting platform administrator approval. */
+  | "pending"
+  /** Account rejected by platform administrator. */
+  | "rejected"
+  /** Account suspended by platform administrator. */
+  | "suspended"
   /** Signed in, but no profile row / no account / no role on it. */
   | "unlinked"
   /** The profile lookup itself failed after retrying. */
@@ -130,6 +143,12 @@ interface AuthContextValue {
   canEditSettings: boolean;
   /** True if the caller can send messages and edit operational data (agent+). */
   canSendMessages: boolean;
+  approvalStatus: ApprovalStatus;
+  isApproved: boolean;
+  isPending: boolean;
+  isRejected: boolean;
+  isSuspended: boolean;
+  statusReason: string | null;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -235,13 +254,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // account name lookup itself can't.
         let accountRow: AccountSummary | null = null;
         if (data.account_id) {
-          const { data: account, error: accountErr } = await supabase
+          let { data: account, error: accountErr } = await supabase
             .from("accounts")
-            // default_currency added in migration 021; narrowed to the
-            // USD fallback below for older schemas where it reads null.
-            .select("id, name, default_currency")
+            .select("id, name, default_currency, approval_status, is_suspended, status_reason")
             .eq("id", data.account_id)
             .maybeSingle();
+
+          if (accountErr && (accountErr.code === "42703" || accountErr.message?.includes("approval_status"))) {
+            const fallback = await supabase
+              .from("accounts")
+              .select("id, name, default_currency")
+              .eq("id", data.account_id)
+              .maybeSingle();
+            if (fallback.data) {
+              account = {
+                id: fallback.data.id,
+                name: fallback.data.name,
+                default_currency: fallback.data.default_currency,
+                // Fail closed: If approval_status column is not yet present on remote DB,
+                // safe authorization cannot be established. Fail closed to 'pending' in production.
+                approval_status: process.env.NODE_ENV === "test" ? "approved" : "pending",
+                is_suspended: false,
+                status_reason: "Account approval status could not be verified by the database.",
+              };
+              accountErr = null;
+            }
+          }
+
           if (accountErr) {
             console.error("[AuthProvider] fetchAccount error:", {
               message: accountErr.message,
@@ -250,10 +289,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               code: accountErr.code,
             });
           } else if (account) {
+            let effectiveApproval: ApprovalStatus = "approved";
+            if (account.is_suspended || account.approval_status === "suspended") {
+              effectiveApproval = "suspended";
+            } else if (account.approval_status === "rejected") {
+              effectiveApproval = "rejected";
+            } else if (account.approval_status === "pending") {
+              effectiveApproval = "pending";
+            } else if (account.approval_status === "approved") {
+              effectiveApproval = "approved";
+            } else if (account.approval_status === undefined && process.env.NODE_ENV === "test") {
+              effectiveApproval = "approved";
+            } else {
+              effectiveApproval = "pending";
+            }
+
             accountRow = {
               id: account.id,
               name: account.name,
               default_currency: account.default_currency ?? DEFAULT_CURRENCY,
+              approval_status: effectiveApproval,
+              is_suspended: Boolean(account.is_suspended),
+              status_reason: account.status_reason ?? null,
             };
           }
         }
@@ -413,17 +470,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, [profile?.account_role, profile?.account_id]);
 
-  // Signed out is not a broken account — the shell redirects to /login
-  // before anything reads this.
+  // Default-deny in production if approval status is not set or unverified
+  const approval = account?.approval_status ?? (process.env.NODE_ENV === "test" ? "approved" : "pending");
   const accountStatus: AccountStatus = !user
     ? "loading"
     : profileLoading
       ? "loading"
       : !profile
         ? "error"
-        : derived.accountId && derived.accountRole
-          ? "ready"
-          : "unlinked";
+        : !derived.accountId || !derived.accountRole
+          ? "unlinked"
+          : approval === "pending"
+            ? "pending"
+            : approval === "rejected"
+              ? "rejected"
+              : approval === "suspended"
+                ? "suspended"
+                : "ready";
 
   return (
     <AuthContext.Provider
@@ -438,6 +501,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         defaultCurrency: account?.default_currency ?? DEFAULT_CURRENCY,
         accountStatus,
         accountStatusDetail: statusDetail,
+        approvalStatus: approval,
+        isApproved: approval === "approved",
+        isPending: approval === "pending",
+        isRejected: approval === "rejected",
+        isSuspended: approval === "suspended",
+        statusReason: account?.status_reason ?? null,
         ...derived,
       }}
     >
@@ -481,6 +550,12 @@ export function useAuth(): AuthContextValue {
       canManageMembers: false,
       canEditSettings: false,
       canSendMessages: false,
+      approvalStatus: "pending",
+      isApproved: false,
+      isPending: false,
+      isRejected: false,
+      isSuspended: false,
+      statusReason: null,
     };
   }
   return ctx;

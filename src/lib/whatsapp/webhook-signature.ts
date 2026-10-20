@@ -55,10 +55,13 @@ export function verifyMetaWebhookSignature(
   rawBody: string,
   signatureHeader: string | null,
 ): boolean {
-  const secrets = parseAppSecrets(process.env.META_APP_SECRET)
+  const secrets = [
+    ...parseAppSecrets(process.env.META_APP_SECRET),
+    ...parseAppSecrets(process.env.WHATSAPP_APP_SECRET),
+  ]
   if (secrets.length === 0) {
     console.error(
-      '[webhook] META_APP_SECRET is not set — rejecting request. ' +
+      '[webhook] Neither META_APP_SECRET nor WHATSAPP_APP_SECRET is set — rejecting request. ' +
         'Configure the env var (Meta → App Settings → Basic → App Secret) ' +
         'to enable signature verification.',
     )
@@ -80,6 +83,7 @@ export function verifyMetaWebhookSignature(
 }
 
 export function verifyTokenMatches(stored: string, presented: string): boolean {
+  if (!stored || !presented) return false
   const a = crypto.createHash('sha256').update(stored).digest()
   const b = crypto.createHash('sha256').update(presented).digest()
   return crypto.timingSafeEqual(a, b)

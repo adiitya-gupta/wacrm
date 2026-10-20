@@ -85,16 +85,26 @@ function LoginPageInner() {
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-4">
-      <Card className="w-full max-w-md border-border bg-card">
+      <Card className="w-full max-w-md border-border bg-card shadow-xl shadow-primary/5">
         <CardHeader className="items-center text-center">
-          <div className="mb-2 flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10">
-            {inviteToken ? (
-              <UsersRound className="h-6 w-6 text-primary" />
-            ) : (
-              <MessageSquare className="h-6 w-6 text-primary" />
-            )}
+          <div className="mb-2 flex flex-col items-center gap-1.5">
+            <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-primary text-primary-foreground shadow-md shadow-primary/20">
+              {inviteToken ? (
+                <UsersRound className="h-6 w-6" />
+              ) : (
+                <MessageSquare className="h-6 w-6" />
+              )}
+            </div>
+            <div className="flex flex-col items-center">
+              <span className="text-xs font-bold uppercase tracking-wider text-primary">
+                Wattomation
+              </span>
+              <span className="text-[10px] font-medium tracking-wider text-muted-foreground uppercase -mt-0.5">
+                by OPSIYS
+              </span>
+            </div>
           </div>
-          <CardTitle className="text-xl text-foreground">
+          <CardTitle className="text-xl font-bold tracking-tight text-foreground">
             {inviteToken ? t('titleAccept') : t('titleWelcome')}
           </CardTitle>
           <CardDescription className="text-muted-foreground">

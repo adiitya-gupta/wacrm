@@ -1,0 +1,100 @@
+import type { SubscriptionPlan, PlanTier } from '@/types/billing';
+
+export const DEFAULT_PLANS: Record<PlanTier, SubscriptionPlan> = {
+  starter: {
+    id: 'starter',
+    name: 'Starter',
+    description: 'For small teams getting started with WhatsApp automation',
+    price_monthly: 2999,
+    price_yearly: 29990,
+    currency: 'INR',
+    monthly_messages_quota: 1000,
+    contacts_quota: 500,
+    team_members_quota: 2,
+    ai_tokens_quota: 100000,
+    features: {
+      ai_agent: true,
+      flows: true,
+      website_integrations: true,
+      broadcasts: true,
+      custom_branding: false,
+    },
+    is_active: true,
+    is_public: true,
+    created_at: new Date().toISOString(),
+  },
+  pro: {
+    id: 'pro',
+    name: 'Professional',
+    description: 'For growing businesses scaling marketing, sales, and support',
+    price_monthly: 6999,
+    price_yearly: 69990,
+    currency: 'INR',
+    monthly_messages_quota: 5000,
+    contacts_quota: 2500,
+    team_members_quota: 5,
+    ai_tokens_quota: 500000,
+    features: {
+      ai_agent: true,
+      flows: true,
+      website_integrations: true,
+      broadcasts: true,
+      custom_branding: true,
+    },
+    is_active: true,
+    is_public: true,
+    created_at: new Date().toISOString(),
+  },
+  enterprise: {
+    id: 'enterprise',
+    name: 'Enterprise',
+    description: 'For large organizations needing custom limits and high concurrency',
+    price_monthly: 19999,
+    price_yearly: 199990,
+    currency: 'INR',
+    monthly_messages_quota: 25000,
+    contacts_quota: 15000,
+    team_members_quota: 20,
+    ai_tokens_quota: 2500000,
+    features: {
+      ai_agent: true,
+      flows: true,
+      website_integrations: true,
+      broadcasts: true,
+      custom_branding: true,
+      dedicated_support: true,
+    },
+    is_active: true,
+    is_public: true,
+    created_at: new Date().toISOString(),
+  },
+  managed_custom: {
+    id: 'managed_custom',
+    name: 'OPSIYS Managed',
+    description: 'Full-service done-for-you automation, workflow design, and management',
+    price_monthly: 14999,
+    price_yearly: 149990,
+    currency: 'INR',
+    monthly_messages_quota: 10000,
+    contacts_quota: 5000,
+    team_members_quota: 10,
+    ai_tokens_quota: 1000000,
+    features: {
+      ai_agent: true,
+      flows: true,
+      website_integrations: true,
+      broadcasts: true,
+      managed_service: true,
+    },
+    is_active: true,
+    is_public: false,
+    created_at: new Date().toISOString(),
+  },
+};
+
+export function getPlanDetails(tier: PlanTier | string): SubscriptionPlan {
+  if (tier in DEFAULT_PLANS) {
+    return DEFAULT_PLANS[tier as PlanTier];
+  }
+  return DEFAULT_PLANS.starter;
+}

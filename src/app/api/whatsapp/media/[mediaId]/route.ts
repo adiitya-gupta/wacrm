@@ -35,7 +35,7 @@ export async function GET(
       )
     }
 
-    const limit = checkRateLimit(`whatsapp-media:${user.id}`, RATE_LIMITS.whatsappMedia)
+    const limit = await checkRateLimit(`whatsapp-media:${user.id}`, RATE_LIMITS.whatsappMedia)
     if (!limit.success) return rateLimitResponse(limit)
 
     // Resolve the caller's account_id — whatsapp_config is one-per-
@@ -52,6 +52,23 @@ export async function GET(
       return NextResponse.json(
         { error: t('common.profileNotLinked') },
         { status: 403 },
+      )
+    }
+
+    // Verify tenant data boundary: The requested media must belong to a message
+    // within the caller's account.
+    const { data: messageMatch } = await supabase
+      .from('messages')
+      .select('id, conversations!inner(account_id)')
+      .or(`media_url.ilike.%${mediaId}%,interactive_reply_id.eq.${mediaId}`)
+      .eq('conversations.account_id', accountId)
+      .limit(1)
+      .maybeSingle()
+
+    if (!messageMatch) {
+      return NextResponse.json(
+        { error: t('media.fetchFailed') },
+        { status: 404 }
       )
     }
 
@@ -84,7 +101,8 @@ export async function GET(
       status: 200,
       headers: {
         'Content-Type': contentType || mediaInfo.mimeType || 'application/octet-stream',
-        'Cache-Control': 'public, max-age=86400',
+        // Private cache header prevents intermediate CDNs or shared caches from storing private WhatsApp media
+        'Cache-Control': 'private, no-cache, no-store, must-revalidate',
       },
     })
   } catch (error) {

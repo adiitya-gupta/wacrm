@@ -1,23 +1,15 @@
 /**
- * In-memory per-key rate limiter.
+ * Distributed and in-memory rate limiter.
  *
- * Fixed-window counter (not token bucket): every identifier gets a
- * fresh N-request budget each window. Simple, allocation-light, and
- * fine for a single-instance VPS — which is how forkers of this
- * template will usually deploy.
+ * Primary mode: Distributed rate limiting backed by Upstash Redis REST API.
+ * Ensures consistent rate limiting across serverless function instances,
+ * multiple regions, and horizontal containers without instance memory isolation.
  *
- * Trade-off: a single Node process holds the Map, so horizontal scale
- * (multiple regions, multiple Hostinger nodes, Vercel serverless fan-
- * out) silently defeats the limit. If you scale beyond one instance,
- * swap the `check` implementation for Redis / Upstash / Cloudflare
- * Durable Objects keeping the same return shape. The call sites won't
- * change.
- *
- * Memory: entries are ~50 bytes each. With LIGHT_SWEEP below, expired
- * keys get cleared opportunistically on every ~1 000th call, so a
- * healthy instance stays in the low-MB range even with thousands of
- * distinct users. No background timer — works in serverless edge
- * runtimes that don't keep timers alive across requests.
+ * Fail-safe security requirement:
+ * In production (NODE_ENV === 'production'), if Redis is unconfigured or
+ * unavailable, it fails safely (fails closed) rather than silently falling back
+ * to an unlimited mode that would allow unthrottled API abuse or denial of service.
+ * In development/test environments, falls back to local in-memory limiting for offline DX.
  */
 
 import { NextResponse } from 'next/server';
@@ -48,9 +40,7 @@ interface Entry {
 
 const buckets = new Map<string, Entry>();
 
-// Opportunistic cleanup. Running a sweep on every call would be
-// quadratic; running it 1-in-N lets the Map self-drain without a
-// background timer.
+// Opportunistic cleanup for in-memory fallback.
 const LIGHT_SWEEP_EVERY = 1000;
 let callsSinceSweep = 0;
 
@@ -60,7 +50,11 @@ function sweepExpired(now: number) {
   }
 }
 
-export function checkRateLimit(
+/**
+ * Synchronous in-memory rate limiter.
+ * Used as the offline fallback in development and testing environments.
+ */
+export function checkRateLimitSync(
   key: string,
   { limit, windowMs }: RateLimitOptions,
 ): RateLimitResult {
@@ -92,6 +86,134 @@ export function checkRateLimit(
   };
 }
 
+// Test harness hook to simulate Redis behaviors without network calls
+type RedisMockFn = (key: string, options: RateLimitOptions) => Promise<RateLimitResult | null>;
+let mockRedisRunner: RedisMockFn | null = null;
+
+export function __setMockRedisForTests(fn: RedisMockFn | null) {
+  mockRedisRunner = fn;
+}
+
+function getRedisConfig(): { url: string; token: string } | null {
+  const url =
+    process.env.UPSTASH_REDIS_REST_URL?.trim() ||
+    process.env.KV_REST_API_URL?.trim() ||
+    '';
+  const token =
+    process.env.UPSTASH_REDIS_REST_TOKEN?.trim() ||
+    process.env.KV_REST_API_TOKEN?.trim() ||
+    '';
+
+  if (!url || !token) return null;
+  return { url: url.replace(/\/+$/, ''), token };
+}
+
+/**
+ * Distributed rate limiter via Upstash Redis REST pipeline.
+ * Runs an atomic pipeline: INCR + PEXPIRE NX + PTTL.
+ */
+async function checkRedis(
+  key: string,
+  options: RateLimitOptions,
+  config: { url: string; token: string },
+): Promise<RateLimitResult> {
+  const redisKey = `ratelimit:${key}`;
+  const now = Date.now();
+
+  const pipeline = [
+    ['INCR', redisKey],
+    ['PEXPIRE', redisKey, String(options.windowMs), 'NX'],
+    ['PTTL', redisKey],
+  ];
+
+  const res = await fetch(`${config.url}/pipeline`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${config.token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(pipeline),
+    signal: AbortSignal.timeout(2500),
+  });
+
+  if (!res.ok) {
+    throw new Error(`Upstash Redis HTTP error: ${res.status} ${res.statusText}`);
+  }
+
+  const data = (await res.json()) as Array<{ result?: unknown; error?: string }>;
+  if (!Array.isArray(data) || data.length < 3) {
+    throw new Error('Malformed pipeline response from Upstash Redis');
+  }
+
+  if (data[0].error) throw new Error(`Redis INCR error: ${data[0].error}`);
+  const count = typeof data[0].result === 'number' ? data[0].result : Number(data[0].result);
+  const ttl = typeof data[2].result === 'number' ? data[2].result : Number(data[2].result);
+
+  const reset = ttl > 0 ? now + ttl : now + options.windowMs;
+  const remaining = Math.max(0, options.limit - count);
+  const success = count <= options.limit;
+
+  return { success, remaining, reset, limit: options.limit };
+}
+
+/**
+ * Primary rate limiter entrypoint.
+ *
+ * Distributed via Upstash Redis in production / multi-instance environments.
+ * Fails safely (fails closed) if production rate limiting is unavailable, preventing
+ * unthrottled API abuse. In development / tests without Redis, uses in-memory limiting.
+ */
+export async function checkRateLimit(
+  key: string,
+  options: RateLimitOptions,
+): Promise<RateLimitResult> {
+  if (mockRedisRunner) {
+    const mocked = await mockRedisRunner(key, options);
+    if (mocked) return mocked;
+  }
+
+  const redisConfig = getRedisConfig();
+  const isProd = process.env.NODE_ENV === 'production';
+
+  if (redisConfig) {
+    try {
+      return await checkRedis(key, options, redisConfig);
+    } catch (err) {
+      console.error(
+        '[rate-limit] Distributed Redis check failed:',
+        err instanceof Error ? err.message : err,
+      );
+
+      if (isProd) {
+        // Fail safely in production: do NOT silently fall back to an unlimited mode.
+        return {
+          success: false,
+          remaining: 0,
+          reset: Date.now() + Math.min(options.windowMs, 60_000),
+          limit: options.limit,
+        };
+      }
+      return checkRateLimitSync(key, options);
+    }
+  }
+
+  if (isProd) {
+    // Fail safely in production when Redis credentials are not configured.
+    console.error(
+      '[rate-limit] CRITICAL: Production environment detected without UPSTASH_REDIS_REST_URL/TOKEN. Failing closed to prevent unthrottled abuse.',
+    );
+    return {
+      success: false,
+      remaining: 0,
+      reset: Date.now() + Math.min(options.windowMs, 60_000),
+      limit: options.limit,
+    };
+  }
+
+  // Development and test offline fallback
+  return checkRateLimitSync(key, options);
+}
+
 /**
  * Standard 429 response with the headers clients expect (RFC 6585 +
  * draft-ietf-httpapi-ratelimit-headers). Callers just `return` this.
@@ -117,64 +239,25 @@ export function rateLimitResponse(result: RateLimitResult): NextResponse {
 
 /** Preconfigured budgets, tweak here not at call sites. */
 export const RATE_LIMITS = {
-  /** Individual message send. 60/min per user = one per second
-   *  sustained, comfortable for a live human typing. */
+  /** Individual message send. 60/min per user. */
   send: { limit: 60, windowMs: 60_000 },
-  /** Broadcast dispatch. NOT one call per campaign: the wizard fans a
-   *  campaign out over `/api/whatsapp/broadcast` in batches of 10
-   *  recipients, roughly one call every 1–2 s, so a 1 000-recipient
-   *  send is ~100 calls over several minutes. This bucket was 5/min on
-   *  the assumption of one call per campaign, which meant everything
-   *  past the first ~50 recipients came back 429 and was recorded as a
-   *  failed recipient (issue #472). 60/min per user carries the wizard's
-   *  pacing with headroom while still bounding a script in a loop;
-   *  Meta's own per-number limits remain the real throughput ceiling. */
+  /** Broadcast dispatch. */
   broadcast: { limit: 60, windowMs: 60_000 },
-  /** Reaction add/swap/remove. More permissive than send — users
-   *  fidget with reactions and a single "swap" is actually two calls
-   *  (remove + add) under the hood. */
+  /** Reaction add/swap/remove. */
   react: { limit: 120, windowMs: 60_000 },
-  /** Invitation peek (public, per-IP). 30/min lets a forwarded link
-   *  retry a handful of times under flaky connectivity without
-   *  enabling brute-force token enumeration. With 256-bit tokens the
-   *  enumeration risk is theoretical; this is belt-and-braces. */
+  /** Invitation peek (public, per-IP). */
   invitationPeek: { limit: 30, windowMs: 60_000 },
-  /** Invitation redeem (authed, per-IP+user). Tighter than peek —
-   *  successful redemption mutates two profiles and an invite row, so
-   *  the abuse surface is "spam join attempts." */
+  /** Invitation redeem (authed, per-IP+user). */
   invitationRedeem: { limit: 10, windowMs: 60_000 },
-  /** Admin-only account / member-management actions: create/revoke
-   *  invitation, rename account, change member role, remove member,
-   *  transfer ownership. 30/min per user is comfortably above any
-   *  realistic legitimate use (the Members tab is a clicks-only UI)
-   *  while still bounding accidental abuse from a script run in a
-   *  loop or a compromised admin session spamming role flips. */
+  /** Admin-only account / member-management actions. */
   adminAction: { limit: 30, windowMs: 60_000 },
-  /** Public REST API (`/api/v1/*`), keyed per API key. 120/min ≈ 2
-   *  req/s sustained — comfortable for a polling integration or an
-   *  automation firing on inbound events, while bounding a runaway
-   *  script. Like every bucket here it's per-process; a multi-
-   *  instance deploy needs the Redis swap described at the top of
-   *  this file (the per-key call sites don't change). */
+  /** Public REST API (`/api/v1/*`), keyed per API key. 120/min. */
   publicApi: { limit: 120, windowMs: 60_000 },
-  /** AI draft-reply generation, per user. 20/min is generous for an
-   *  agent clicking "Draft with AI" while working a thread, and bounds
-   *  spend on the account's own LLM key against an accidental
-   *  hold-down / script. */
+  /** AI draft-reply generation, per user. */
   aiDraft: { limit: 20, windowMs: 60_000 },
-  /** AI draft-reply generation, per account. Caps the WHOLE team's
-   *  draws on the one shared BYO provider key — without this, N agents
-   *  each under their per-user limit could still stampede the account's
-   *  key past the provider's own rate limit. 60/min ≈ three busy agents
-   *  drafting flat-out. */
+  /** AI draft-reply generation, per account. */
   aiDraftAccount: { limit: 60, windowMs: 60_000 },
-  /** AI auto-reply generation, per account. The per-conversation cap
-   *  (`auto_reply_max_per_conversation`) bounds one thread; this bounds
-   *  the whole account across threads, so a burst of inbound from many
-   *  customers at once can't run the BYO key past the provider's limit
-   *  or the owner's budget. 30/min is generous for organic inbound while
-   *  capping a stampede; excess inbounds simply don't get an auto-reply
-   *  (they still land in the inbox for a human). */
+  /** AI auto-reply generation, per account. 30/min. */
   aiAutoReplyAccount: { limit: 30, windowMs: 60_000 },
   whatsappAdmin: { limit: 30, windowMs: 60_000 },
   whatsappMedia: { limit: 240, windowMs: 60_000 },
@@ -186,4 +269,5 @@ export const RATE_LIMITS = {
 export function __resetRateLimitForTests() {
   buckets.clear();
   callsSinceSweep = 0;
+  mockRedisRunner = null;
 }

@@ -82,12 +82,12 @@ export function AiPlayground({ onGoToSetup }: { onGoToSetup?: () => void }) {
   };
 
   return (
-    <div className="flex h-[60vh] min-h-[420px] flex-col rounded-xl border border-border bg-card">
+    <div className="flex h-[60vh] min-h-[420px] flex-col rounded-xl border border-border bg-card shadow-xs">
       {/* Header */}
       <div className="flex items-center justify-between border-b border-border px-4 py-3">
         <div className="flex items-center gap-2">
           <Bot className="h-4 w-4 text-primary" />
-          <span className="text-sm font-medium text-foreground">{t('title')}</span>
+          <span className="text-sm font-semibold text-foreground">{t('title')}</span>
           <span className="text-xs text-muted-foreground">
             {t('subtitle')}
           </span>
@@ -97,7 +97,7 @@ export function AiPlayground({ onGoToSetup }: { onGoToSetup?: () => void }) {
           size="sm"
           onClick={() => setTurns([])}
           disabled={turns.length === 0 || sending}
-          className="text-muted-foreground"
+          className="text-muted-foreground hover:text-foreground"
         >
           <RotateCcw className="mr-1.5 h-3.5 w-3.5" /> {t('reset')}
         </Button>
@@ -108,8 +108,8 @@ export function AiPlayground({ onGoToSetup }: { onGoToSetup?: () => void }) {
         {turns.length === 0 && (
           <div className="flex h-full flex-col items-center justify-center text-center text-sm text-muted-foreground">
             <Bot className="mb-2 h-8 w-8 text-muted-foreground/60" />
-            <p>{t('emptyTitle')}</p>
-            <p className="mt-1 text-xs">
+            <p className="font-medium text-foreground">{t('emptyTitle')}</p>
+            <p className="mt-1 text-xs text-muted-foreground max-w-sm">
               {t('emptyDesc')}
             </p>
             {onGoToSetup && (
@@ -117,7 +117,7 @@ export function AiPlayground({ onGoToSetup }: { onGoToSetup?: () => void }) {
                 variant="link"
                 size="sm"
                 onClick={onGoToSetup}
-                className="mt-1 h-auto p-0 text-xs"
+                className="mt-1 h-auto p-0 text-xs text-primary"
               >
                 {t('goToSetup')} <ArrowRight className="ml-1 h-3 w-3" />
               </Button>
@@ -140,15 +140,15 @@ export function AiPlayground({ onGoToSetup }: { onGoToSetup?: () => void }) {
               className={cn(
                 'max-w-[80%] rounded-2xl px-3.5 py-2 text-sm',
                 turn.role === 'user'
-                  ? 'rounded-br-sm bg-primary text-primary-foreground'
-                  : 'rounded-bl-sm bg-muted text-foreground',
+                  ? 'rounded-br-sm bg-primary text-primary-foreground shadow-xs'
+                  : 'rounded-bl-sm bg-muted/60 border border-border/60 text-foreground shadow-xs',
               )}
             >
               {turn.content && <p className="whitespace-pre-wrap">{turn.content}</p>}
               {turn.role === 'assistant' && turn.handoff && (
                 <p
                   className={cn(
-                    'flex items-center gap-1 text-xs text-amber-500',
+                    'flex items-center gap-1 text-xs text-[#D97706] font-medium',
                     turn.content && 'mt-1.5 border-t border-border/50 pt-1.5',
                   )}
                 >
@@ -166,7 +166,7 @@ export function AiPlayground({ onGoToSetup }: { onGoToSetup?: () => void }) {
         {sending && (
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <Bot className="h-5 w-5 text-primary" />
-            <Loader2 className="h-4 w-4 animate-spin" /> {t('thinking')}
+            <Loader2 className="h-4 w-4 animate-spin text-primary" /> {t('thinking')}
           </div>
         )}
       </div>
@@ -179,13 +179,13 @@ export function AiPlayground({ onGoToSetup }: { onGoToSetup?: () => void }) {
           onKeyDown={handleKeyDown}
           placeholder={t('placeholder')}
           rows={1}
-          className="flex-1 resize-none rounded-xl border border-border bg-muted px-4 py-2.5 text-sm text-foreground placeholder-muted-foreground outline-none focus:border-primary/50"
+          className="flex-1 resize-none rounded-xl border border-border bg-card px-4 py-2.5 text-sm text-foreground placeholder-muted-foreground outline-none transition-colors focus:border-primary focus:ring-1 focus:ring-primary"
         />
         <Button
           size="sm"
           onClick={send}
           disabled={!input.trim() || sending}
-          className="h-9 w-9 shrink-0 p-0"
+          className="h-9 w-9 shrink-0 p-0 bg-primary hover:bg-primary-hover text-primary-foreground"
         >
           {sending ? (
             <Loader2 className="h-4 w-4 animate-spin" />

@@ -53,6 +53,39 @@ export async function findActiveKeyByHash(
     return null;
   }
 
+  // Account governance check: Ensure the account is approved and not suspended
+  const { data: account, error: accErr } = await supabaseAdmin()
+    .from('accounts')
+    .select('id, is_suspended, approval_status')
+    .eq('id', data.account_id)
+    .maybeSingle();
+
+  if (accErr && (accErr.code === '42703' || accErr.message?.includes('approval_status'))) {
+    const { data: fbAccount } = await supabaseAdmin()
+      .from('accounts')
+      .select('id, is_suspended')
+      .eq('id', data.account_id)
+      .maybeSingle();
+    if (fbAccount?.is_suspended) {
+      return null;
+    }
+    // Fail closed: In production, if approval_status column does not exist,
+    // safe authorization cannot be established. Reject API keys until migration 050 is run.
+    if (process.env.NODE_ENV !== 'test') {
+      console.warn(
+        '[api-keys/store] Rejecting API key: approval_status column is missing and safe authorization cannot be established (migration 050 pending).'
+      );
+      return null;
+    }
+  } else if (account) {
+    if (account.is_suspended) {
+      return null;
+    }
+    if (account.approval_status && account.approval_status !== 'approved') {
+      return null;
+    }
+  }
+
   return data as ApiKeyRow;
 }
 

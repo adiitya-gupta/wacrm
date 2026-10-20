@@ -1,7 +1,7 @@
 import { NextResponse, after } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { decrypt, encrypt, isLegacyFormat } from '@/lib/whatsapp/encryption'
-import { getMediaUrl, downloadMedia } from '@/lib/whatsapp/meta-api'
+import { getMediaUrl } from '@/lib/whatsapp/meta-api'
 import { mirrorInboundMedia } from '@/lib/whatsapp/mirror-inbound-media'
 import { normalizePhone } from '@/lib/whatsapp/phone-utils'
 import {
@@ -40,7 +40,13 @@ function supabaseAdmin() {
   if (!_adminClient) {
     _adminClient = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_ROLE_KEY!
+      process.env.SUPABASE_SERVICE_ROLE_KEY!,
+      {
+        auth: {
+          persistSession: false,
+          autoRefreshToken: false,
+        },
+      }
     )
   }
   return _adminClient
@@ -142,51 +148,69 @@ interface WhatsAppWebhookEntry {
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url)
-    const mode = searchParams.get('hub.mode')
-    const challenge = searchParams.get('hub.challenge')
-    const verifyToken = searchParams.get('hub.verify_token')
+    const mode = searchParams.get('hub.mode') || searchParams.get('hub_mode')
+    const challenge = searchParams.get('hub.challenge') || searchParams.get('hub_challenge')
+    const verifyToken = searchParams.get('hub.verify_token') || searchParams.get('hub_verify_token')
 
-    if (mode !== 'subscribe' || !challenge || !verifyToken) {
+    if (!mode || !challenge || !verifyToken) {
       return NextResponse.json(
         { error: 'Missing verification parameters' },
         { status: 400 }
       )
     }
 
-    // Fetch all whatsapp configs to check verify tokens
+    if (mode !== 'subscribe') {
+      return NextResponse.json(
+        { error: 'Invalid verification mode' },
+        { status: 400 }
+      )
+    }
+
+    // 1. Fetch saved whatsapp configs from Supabase (WACRM settings source of truth)
     const { data: configs, error: configError } = await supabaseAdmin()
       .from('whatsapp_config')
       .select('id, verify_token')
 
-    if (configError || !configs) {
-      console.error('Error fetching configs for verification:', configError)
-      return NextResponse.json(
-        { error: 'Verification failed' },
-        { status: 403 }
-      )
-    }
+    let matchedConfig: { id: string; verify_token: string | null } | null = null
+    let tokenMatched = false
 
-    // Check if any config's verify_token matches. Also collect the
-    // matching row so we can opportunistically upgrade its token to
-    // GCM if it was still in the legacy CBC format.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let matchedConfig: any = null
-    for (const config of configs) {
-      if (!config.verify_token) continue
-      try {
-        if (verifyTokenMatches(decrypt(config.verify_token), verifyToken)) {
-          matchedConfig = config
-          break
+    if (!configError && configs) {
+      for (const config of configs) {
+        if (!config.verify_token) continue
+        try {
+          if (verifyTokenMatches(decrypt(config.verify_token), verifyToken)) {
+            matchedConfig = config
+            tokenMatched = true
+            break
+          }
+        } catch {
+          // Malformed / wrong-key token row — skip it and keep checking.
         }
-      } catch {
-        // Malformed / wrong-key token row — skip it and keep checking.
       }
     }
 
-    if (matchedConfig) {
+    // 2. Fallback to environment variable WHATSAPP_VERIFY_TOKEN or META_VERIFY_TOKEN
+    if (!tokenMatched) {
+      const envTokens = [
+        process.env.WHATSAPP_VERIFY_TOKEN,
+        process.env.META_VERIFY_TOKEN,
+      ].filter(Boolean) as string[]
+
+      for (const envVal of envTokens) {
+        for (const candidate of envVal.split(',').map((t) => t.trim()).filter(Boolean)) {
+          if (verifyTokenMatches(candidate, verifyToken)) {
+            tokenMatched = true
+            break
+          }
+        }
+        if (tokenMatched) break
+      }
+    }
+
+    if (tokenMatched) {
       // Fire-and-forget GCM upgrade. Safe to run on every subscribe
       // since it's a no-op once the column is already GCM.
-      if (isLegacyFormat(matchedConfig.verify_token)) {
+      if (matchedConfig && matchedConfig.verify_token && isLegacyFormat(matchedConfig.verify_token)) {
         void supabaseAdmin()
           .from('whatsapp_config')
           .update({ verify_token: encrypt(verifyToken) })
@@ -200,7 +224,7 @@ export async function GET(request: Request) {
             }
           })
       }
-      // Return challenge as plain text
+      // Return challenge as plain text with 200 OK
       return new Response(challenge, {
         status: 200,
         headers: { 'Content-Type': 'text/plain' },

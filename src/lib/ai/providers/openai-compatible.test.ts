@@ -154,4 +154,30 @@ describe('generateOpenAiCompatible', () => {
 
     expect(fetchMock.mock.calls[0][1].redirect).toBe('manual')
   })
+
+  it('correctly parses Cloudflare Workers AI wrapped responses', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          result: {
+            choices: [{ message: { content: 'Cloudflare AI answer' } }],
+          },
+          success: true,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await generateOpenAiCompatible({
+      apiKey: 'test-token',
+      model: '@cf/meta/llama-3.1-8b-instruct',
+      systemPrompt: 'sys',
+      messages: [{ role: 'user', content: 'Hello' }],
+      timeoutMs: 1000,
+      baseUrl: 'https://api.cloudflare.com/client/v4/accounts/acct-123/ai/run/@cf/meta/llama-3.1-8b-instruct',
+    })
+
+    expect(result.text).toBe('Cloudflare AI answer')
+  })
 })

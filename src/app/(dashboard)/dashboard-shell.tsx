@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { AuthProvider, useAuth } from "@/hooks/use-auth";
 import { Sidebar } from "@/components/layout/sidebar";
@@ -9,14 +9,28 @@ import { Header } from "@/components/layout/header";
 import { AccountAccessAlert } from "@/components/layout/account-access-alert";
 import { PresenceHeartbeat } from "@/components/presence/presence-heartbeat";
 import { BrowserNotificationsListener } from "@/components/notifications/browser-notifications-listener";
+import {
+  AccountPendingScreen,
+  AccountRejectedScreen,
+  AccountSuspendedScreen,
+} from "@/components/auth/account-status-screens";
 
 // Auth-gated dashboard shell. Extracted from the layout so the layout
 // itself can stay a server component and export metadata (noindex) —
 // client components can't export Next's metadata object.
 
 function DashboardShellInner({ children }: { children: React.ReactNode }) {
-  const { user, loading } = useAuth();
+  const {
+    user,
+    profile,
+    account,
+    loading,
+    accountStatus,
+    refreshProfile,
+    signOut,
+  } = useAuth();
   const router = useRouter();
+  const pathname = usePathname();
   const t = useTranslations("DashboardShell");
 
   // Sidebar drawer state — only used on mobile. On lg+ the sidebar is
@@ -42,6 +56,42 @@ function DashboardShellInner({ children }: { children: React.ReactNode }) {
   }
 
   if (!user) return null;
+
+  // The private /admin route has its own platform admin authorization gate
+  const isAdminRoute = pathname?.startsWith("/admin");
+
+  if (!isAdminRoute) {
+    if (accountStatus === "pending") {
+      return (
+        <AccountPendingScreen
+          email={profile?.email || user.email}
+          accountName={account?.name}
+          onRefresh={refreshProfile}
+          onSignOut={signOut}
+        />
+      );
+    }
+
+    if (accountStatus === "rejected") {
+      return (
+        <AccountRejectedScreen
+          email={profile?.email || user.email}
+          reason={account?.status_reason}
+          onSignOut={signOut}
+        />
+      );
+    }
+
+    if (accountStatus === "suspended") {
+      return (
+        <AccountSuspendedScreen
+          email={profile?.email || user.email}
+          reason={account?.status_reason}
+          onSignOut={signOut}
+        />
+      );
+    }
+  }
 
   return (
     <div className="flex h-screen overflow-hidden bg-background">

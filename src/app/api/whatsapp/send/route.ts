@@ -11,6 +11,7 @@ import {
   validateSendMessageParams,
   SendMessageError,
 } from '@/lib/whatsapp/send-message'
+import { checkAccountQuota, incrementAccountUsage } from '@/lib/billing/quota'
 import { getT } from '@/lib/i18n/translate'
 
 const t = getT('Api')
@@ -39,9 +40,18 @@ export async function POST(request: Request) {
 
     // Per-user rate limit. Bucket key is scoped to this route so
     // `/broadcast` has an independent budget.
-    const limit = checkRateLimit(`send:${userId}`, RATE_LIMITS.send)
+    const limit = await checkRateLimit(`send:${userId}`, RATE_LIMITS.send)
     if (!limit.success) {
       return rateLimitResponse(limit)
+    }
+
+    // Server-side subscription quota enforcement
+    const quota = await checkAccountQuota(supabase, accountId, 'messages')
+    if (!quota.allowed) {
+      return NextResponse.json(
+        { error: quota.reason || 'Monthly message quota exceeded' },
+        { status: 402 }
+      )
     }
 
     const body = await request.json()
@@ -169,6 +179,8 @@ export async function POST(request: Request) {
         interactivePayload: interactive_payload,
         replyToMessageId: reply_to_message_id,
       })
+
+      await incrementAccountUsage(supabase, accountId, { messages: 1 })
 
       return NextResponse.json({
         success: true,

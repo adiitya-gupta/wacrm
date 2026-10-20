@@ -41,6 +41,7 @@ import {
   isRecipientNotAllowedError,
 } from '@/lib/whatsapp/phone-utils';
 import { resolveContactSendTarget } from '@/lib/whatsapp/wa-identity';
+import { checkAccountQuota, incrementAccountUsage } from '@/lib/billing/quota';
 import type { MessageTemplate } from '@/types';
 import {
   resolveTemplateRow,

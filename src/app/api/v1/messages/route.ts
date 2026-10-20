@@ -39,6 +39,7 @@ import {
   validateSendMessageParams,
   SendMessageError,
 } from '@/lib/whatsapp/send-message';
+import { checkAccountQuota, incrementAccountUsage } from '@/lib/billing/quota';
 import type { InteractiveMessagePayload } from '@/lib/whatsapp/interactive';
 
 export async function POST(request: Request) {
@@ -95,6 +96,12 @@ export async function POST(request: Request) {
       interactivePayload,
     });
 
+    // Check message quota before resolving contact or sending
+    const quota = await checkAccountQuota(ctx.supabase, ctx.accountId, 'messages');
+    if (!quota.allowed) {
+      return fail('quota_exceeded', quota.reason || 'Monthly message quota exceeded', 402);
+    }
+
     // Find-or-create the conversation for this phone, then send. Both
     // steps share `SendMessageError`, so one catch maps the whole
     // pipeline to the envelope.
@@ -105,20 +112,66 @@ export async function POST(request: Request) {
       typeof body.name === 'string' ? body.name : null
     );
 
+    // Check if customer care window is open when attempting to send freeform text
+    let sendMessageType = type;
+    let sendTemplateName = typeof template?.name === 'string' ? template.name : null;
+    let sendTemplateLanguage = typeof template?.language === 'string' ? template.language : null;
+    let sendTemplateParams = templateParams;
+    let sendTemplateMessageParams = templateMessageParams;
+
+    if (sendMessageType === 'text') {
+      const { data: recentInbound } = await ctx.supabase
+        .from('messages')
+        .select('created_at')
+        .eq('conversation_id', resolved.conversationId)
+        .eq('sender_type', 'customer')
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      const hasRecentCustomerMessage =
+        recentInbound &&
+        recentInbound.length > 0 &&
+        Date.now() - new Date(recentInbound[0].created_at).getTime() < 24 * 60 * 60 * 1000;
+
+      if (!hasRecentCustomerMessage) {
+        // Outside 24h window: Meta strictly rejects freeform text (Error 131047).
+        // Find an approved template for this account to ensure message delivery.
+        const { data: approvedTemplates } = await ctx.supabase
+          .from('message_templates')
+          .select('name, language')
+          .eq('account_id', ctx.accountId)
+          .eq('status', 'APPROVED');
+
+        const fallbackTemplate = (approvedTemplates || []).find(
+          (t: { name: string; language: string }) =>
+            t.name === 'opsiys_welcome' || t.name.toLowerCase().includes('welcome')
+        );
+
+        if (fallbackTemplate) {
+          console.log(
+            `[api/v1/messages] 24h window closed for ${to}. Auto-routing freeform text to approved template "${fallbackTemplate.name}".`
+          );
+          sendMessageType = 'template';
+          sendTemplateName = fallbackTemplate.name;
+          sendTemplateLanguage = fallbackTemplate.language || 'en_US';
+          sendTemplateParams = [typeof body.name === 'string' ? body.name : 'there'];
+        }
+      }
+    }
+
     const result = await sendMessageToConversation(
       ctx.supabase,
       ctx.accountId,
       {
         conversationId: resolved.conversationId,
-        messageType: type,
+        messageType: sendMessageType,
         contentText: typeof body.text === 'string' ? body.text : null,
         mediaUrl: typeof body.media_url === 'string' ? body.media_url : null,
         filename: typeof body.filename === 'string' ? body.filename : null,
-        templateName: typeof template?.name === 'string' ? template.name : null,
-        templateLanguage:
-          typeof template?.language === 'string' ? template.language : null,
-        templateParams,
-        templateMessageParams,
+        templateName: sendTemplateName,
+        templateLanguage: sendTemplateLanguage,
+        templateParams: sendTemplateParams,
+        templateMessageParams: sendTemplateMessageParams,
         interactivePayload,
         replyToMessageId:
           typeof body.reply_to_message_id === 'string'
@@ -126,6 +179,8 @@ export async function POST(request: Request) {
             : null,
       }
     );
+
+    await incrementAccountUsage(ctx.supabase, ctx.accountId, { messages: 1 });
 
     return ok(
       {

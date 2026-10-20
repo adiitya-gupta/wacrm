@@ -23,34 +23,34 @@ export const templateStatusConfig: Record<
 > = {
   DRAFT: {
     label: t('DRAFT'),
-    classes: 'bg-slate-600/20 text-muted-foreground border-slate-600/30',
+    classes: 'bg-[#F1F5F9] text-[#64748B] border-[#E5E9F2]',
   },
   PENDING: {
     label: t('PENDING'),
-    classes: 'bg-yellow-600/20 text-yellow-400 border-yellow-600/30',
+    classes: 'bg-[#FEF3C7] text-[#D97706] border-[#FDE68A]',
   },
   APPROVED: {
     label: t('APPROVED'),
-    classes: 'bg-primary/20 text-primary border-primary/30',
+    classes: 'bg-[#DCFCE7] text-[#16A34A] border-[#BBF7D0]',
   },
   REJECTED: {
     label: t('REJECTED'),
-    classes: 'bg-red-600/20 text-red-400 border-red-600/30',
+    classes: 'bg-[#FEE2E2] text-[#DC2626] border-[#FECACA]',
   },
   PAUSED: {
     label: t('PAUSED'),
-    classes: 'bg-orange-600/20 text-orange-400 border-orange-600/30',
+    classes: 'bg-[#FEF3C7] text-[#D97706] border-[#FDE68A]',
   },
   DISABLED: {
     label: t('DISABLED'),
-    classes: 'bg-red-900/30 text-red-500 border-red-900/40',
+    classes: 'bg-[#FEE2E2] text-[#DC2626] border-[#FECACA]',
   },
   IN_APPEAL: {
     label: t('IN_APPEAL'),
-    classes: 'bg-blue-600/20 text-blue-400 border-blue-600/30',
+    classes: 'bg-[#E0F2FE] text-[#0284C7] border-[#BAE6FD]',
   },
   PENDING_DELETION: {
     label: t('PENDING_DELETION'),
-    classes: 'bg-slate-700/30 text-muted-foreground border-slate-700/40',
+    classes: 'bg-[#F1F5F9] text-[#64748B] border-[#E5E9F2]',
   },
 };

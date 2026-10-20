@@ -63,9 +63,9 @@ type HeaderFormat = 'none' | 'text' | 'image' | 'video' | 'document';
 const HEADER_FORMATS: HeaderFormat[] = ['none', 'text', 'image', 'video', 'document'];
 
 const categoryColors: Record<string, string> = {
-  Marketing: 'bg-purple-600/20 text-purple-400 border-purple-600/30',
-  Utility: 'bg-blue-600/20 text-blue-400 border-blue-600/30',
-  Authentication: 'bg-amber-600/20 text-amber-400 border-amber-600/30',
+  Marketing: 'bg-primary-soft text-primary border-primary/20',
+  Utility: 'bg-[#DBEAFE] text-[#1D4ED8] border-[#BFDBFE]',
+  Authentication: 'bg-[#FEF3C7] text-[#B45309] border-[#FDE68A]',
 };
 
 interface TemplateFormData {
@@ -579,12 +579,12 @@ export function TemplateManager() {
                       )}
                       {template.quality_score && (
                         <span
-                          className={`text-[10px] uppercase font-medium ${
+                          className={`text-[10px] uppercase font-semibold ${
                             template.quality_score === 'GREEN'
-                              ? 'text-emerald-400'
+                              ? 'text-[#15803D]'
                               : template.quality_score === 'YELLOW'
-                                ? 'text-yellow-400'
-                                : 'text-red-400'
+                                ? 'text-[#B45309]'
+                                : 'text-[#B91C1C]'
                           }`}
                           title={t('qualityScoreTitle')}
                         >

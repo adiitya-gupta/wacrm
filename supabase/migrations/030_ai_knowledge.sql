@@ -30,6 +30,8 @@
 -- Idempotent — safe to run multiple times.
 -- ============================================================
 
+SET search_path TO public, extensions;
+
 CREATE EXTENSION IF NOT EXISTS vector;
 
 -- Optional embeddings key (OpenAI-compatible). When set, the KB is

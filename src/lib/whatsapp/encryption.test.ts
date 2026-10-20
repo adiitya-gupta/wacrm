@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { decrypt, encrypt, isLegacyFormat } from "./encryption";
+import { decrypt, encrypt, isLegacyFormat, validateEncryptionKey } from "./encryption";
 
 const KEY_HEX = process.env.ENCRYPTION_KEY!;
 
@@ -120,6 +120,29 @@ describe("encryption", () => {
 
     it("throws on a four-part blob", () => {
       expect(() => decrypt("aa:bb:cc:dd")).toThrow(/unrecognised format/);
+    });
+  });
+
+  describe("validateEncryptionKey", () => {
+    it("returns a 32-byte Buffer for a valid 64-character hex key", () => {
+      const validHex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+      const buf = validateEncryptionKey(validHex);
+      expect(buf).toBeInstanceOf(Buffer);
+      expect(buf.length).toBe(32);
+    });
+
+    it("throws when key is missing or empty without leaking secrets", () => {
+      expect(() => validateEncryptionKey("")).toThrow(/Missing ENCRYPTION_KEY/);
+      expect(() => validateEncryptionKey("   ")).toThrow(/Missing ENCRYPTION_KEY/);
+    });
+
+    it("throws when key length is invalid (e.g. 32 chars instead of 64 hex chars)", () => {
+      expect(() => validateEncryptionKey("short_key_12345")).toThrow(/Invalid ENCRYPTION_KEY length/);
+    });
+
+    it("throws when key contains non-hexadecimal characters", () => {
+      const nonHex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789zzzzzz";
+      expect(() => validateEncryptionKey(nonHex)).toThrow(/Must be exactly 64 hexadecimal characters/);
     });
   });
 });

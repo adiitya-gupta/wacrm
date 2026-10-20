@@ -31,7 +31,9 @@ describe('GET /api/automations/cron', () => {
     vi.clearAllMocks()
     process.env.AUTOMATION_CRON_SECRET = SECRET
     process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://test.supabase.co'
+    delete process.env.SUPABASE_URL
     process.env.SUPABASE_SERVICE_ROLE_KEY = 'test_service_role_key_secret'
+    delete process.env.SUPABASE_SERVICE_KEY
 
     mocks.expireAwaitingReplies.mockResolvedValue(0)
 
@@ -82,8 +84,9 @@ describe('GET /api/automations/cron', () => {
     expect(res.status).toBe(401)
   })
 
-  it('fails with 500 when NEXT_PUBLIC_SUPABASE_URL is missing', async () => {
+  it('fails with 500 and diagnostic headers when URL is missing', async () => {
     delete process.env.NEXT_PUBLIC_SUPABASE_URL
+    delete process.env.SUPABASE_URL
 
     const req = new Request('http://localhost/api/automations/cron', {
       method: 'GET',
@@ -92,12 +95,29 @@ describe('GET /api/automations/cron', () => {
 
     const res = await GET(req)
     expect(res.status).toBe(500)
-    const body = (await res.json()) as { error: string }
-    expect(body.error).toContain('NEXT_PUBLIC_SUPABASE_URL')
+    expect(res.headers.get('x-cron-error-step')).toBe('env_validation')
+    expect(res.headers.get('x-cron-error-code')).toBe('MISSING_ENV')
+    const body = (await res.json()) as { error: string; code: string; step: string; message: string }
+    expect(body.step).toBe('env_validation')
+    expect(body.message).toContain('NEXT_PUBLIC_SUPABASE_URL/SUPABASE_URL')
   })
 
-  it('fails with 500 when SUPABASE_SERVICE_ROLE_KEY is missing', async () => {
+  it('succeeds using fallback SUPABASE_URL when NEXT_PUBLIC_SUPABASE_URL is absent', async () => {
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL
+    process.env.SUPABASE_URL = 'https://fallback.supabase.co'
+
+    const req = new Request('http://localhost/api/automations/cron', {
+      method: 'GET',
+      headers: { 'x-cron-secret': SECRET },
+    })
+
+    const res = await GET(req)
+    expect(res.status).toBe(200)
+  })
+
+  it('fails with 500 and diagnostic headers when service key is missing', async () => {
     delete process.env.SUPABASE_SERVICE_ROLE_KEY
+    delete process.env.SUPABASE_SERVICE_KEY
 
     const req = new Request('http://localhost/api/automations/cron', {
       method: 'GET',
@@ -106,11 +126,27 @@ describe('GET /api/automations/cron', () => {
 
     const res = await GET(req)
     expect(res.status).toBe(500)
-    const body = (await res.json()) as { error: string }
-    expect(body.error).toContain('SUPABASE_SERVICE_ROLE_KEY')
+    expect(res.headers.get('x-cron-error-step')).toBe('env_validation')
+    expect(res.headers.get('x-cron-error-code')).toBe('MISSING_ENV')
+    const body = (await res.json()) as { error: string; code: string; step: string; message: string }
+    expect(body.step).toBe('env_validation')
+    expect(body.message).toContain('SUPABASE_SERVICE_ROLE_KEY/SUPABASE_SERVICE_KEY')
   })
 
-  it('fails with 500 and exposes structured error when Supabase query returns an error', async () => {
+  it('succeeds using fallback SUPABASE_SERVICE_KEY when SUPABASE_SERVICE_ROLE_KEY is absent', async () => {
+    delete process.env.SUPABASE_SERVICE_ROLE_KEY
+    process.env.SUPABASE_SERVICE_KEY = 'test_fallback_service_key'
+
+    const req = new Request('http://localhost/api/automations/cron', {
+      method: 'GET',
+      headers: { 'x-cron-secret': SECRET },
+    })
+
+    const res = await GET(req)
+    expect(res.status).toBe(200)
+  })
+
+  it('fails with 500 and diagnostic headers when Supabase query returns an error', async () => {
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
 
     const queryChain: Record<string, unknown> = {}
@@ -134,12 +170,38 @@ describe('GET /api/automations/cron', () => {
 
     const res = await GET(req)
     expect(res.status).toBe(500)
-    const body = (await res.json()) as { error: string; code?: string }
+    expect(res.headers.get('x-cron-error-step')).toBe('query_due_executions')
+    expect(res.headers.get('x-cron-error-code')).toBe('PGRST205')
+    expect(res.headers.get('x-cron-error-message')).toContain("Could not find table 'automation_pending_executions'")
+
+    const body = (await res.json()) as { error: string; code: string; step: string; message: string }
     expect(body.code).toBe('PGRST205')
-    expect(consoleSpy).toHaveBeenCalledWith(
-      expect.stringContaining('[automations-cron] Database query error'),
-      expect.objectContaining({ code: 'PGRST205' }),
-    )
+    expect(body.step).toBe('query_due_executions')
+    expect(consoleSpy).toHaveBeenCalled()
+
+    consoleSpy.mockRestore()
+  })
+
+  it('catches unexpected execution exceptions and returns 500 with diagnostic headers', async () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    mocks.supabaseAdmin.mockImplementation(() => {
+      throw new Error('Supabase client crash')
+    })
+
+    const req = new Request('http://localhost/api/automations/cron', {
+      method: 'GET',
+      headers: { 'x-cron-secret': SECRET },
+    })
+
+    const res = await GET(req)
+    expect(res.status).toBe(500)
+    expect(res.headers.get('x-cron-error-step')).toBe('handler_execution')
+    expect(res.headers.get('x-cron-error-message')).toBe('Supabase client crash')
+
+    const body = (await res.json()) as { error: string; step: string; message: string }
+    expect(body.step).toBe('handler_execution')
+    expect(body.message).toBe('Supabase client crash')
 
     consoleSpy.mockRestore()
   })
@@ -183,7 +245,7 @@ describe('GET /api/automations/cron', () => {
     updateChain.maybeSingle = vi.fn().mockResolvedValue({ data: { id: 'row-1' }, error: null })
 
     mocks.supabaseAdmin.mockReturnValue({
-      from: vi.fn((table: string) => ({
+      from: vi.fn(() => ({
         select: vi.fn().mockReturnValue(selectChain),
         update: vi.fn().mockReturnValue(updateChain),
       })),

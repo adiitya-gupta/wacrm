@@ -7,12 +7,15 @@ let _adminClient: SupabaseClient | null = null
 
 export function supabaseAdmin(): SupabaseClient {
   if (!_adminClient) {
-    const url = process.env.NEXT_PUBLIC_SUPABASE_URL
-    const key = process.env.SUPABASE_SERVICE_ROLE_KEY
+    const rawUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL
+    const rawKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY
+    const url = rawUrl?.trim().replace(/^["']|["']$/g, '')
+    const key = rawKey?.trim().replace(/^["']|["']$/g, '')
+
     if (!url || !key) {
       const missing = [
-        !url ? 'NEXT_PUBLIC_SUPABASE_URL' : null,
-        !key ? 'SUPABASE_SERVICE_ROLE_KEY' : null,
+        !url ? 'NEXT_PUBLIC_SUPABASE_URL/SUPABASE_URL' : null,
+        !key ? 'SUPABASE_SERVICE_ROLE_KEY/SUPABASE_SERVICE_KEY' : null,
       ]
         .filter(Boolean)
         .join(', ')

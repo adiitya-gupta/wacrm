@@ -4,6 +4,72 @@ import { expireAwaitingReplies, resumePendingExecution } from '@/lib/automations
 import type { AutomationContext } from '@/lib/automations/engine'
 import { authenticateCronRequest } from '@/lib/cron/auth'
 
+interface ErrorWithPostgrestFields {
+  code?: string
+  message: string
+  details?: string | null
+  hint?: string | null
+}
+
+/**
+ * Safely format and return an error response for the automations cron endpoint.
+ *
+ * Guarantees:
+ * 1. Single-line human-readable string to console.error (stderr).
+ * 2. An Error instance with stack trace logged to console.error so Vercel Function
+ *    monitoring flags it as a true serverless exception.
+ * 3. Diagnostic response headers (`x-cron-error-step`, `x-cron-error-code`, `x-cron-error-message`)
+ *    that appear directly in Vercel's Request Inspector panel.
+ * 4. Never logs or leaks secrets, authorization tokens, or customer data.
+ */
+function cronErrorResponse(
+  status: number,
+  step: string,
+  error: ErrorWithPostgrestFields | Error | string,
+) {
+  const code =
+    typeof error === 'object' && 'code' in error && error.code
+      ? String(error.code)
+      : error instanceof Error
+        ? error.name || 'ERROR'
+        : 'ERROR'
+
+  const message =
+    typeof error === 'string'
+      ? error
+      : error instanceof Error
+        ? error.message
+        : error.message || 'Unknown error'
+
+  const details = typeof error === 'object' && 'details' in error ? error.details : undefined
+  const hint = typeof error === 'object' && 'hint' in error ? error.hint : undefined
+
+  const logMessage = `[automations-cron] [${step}] [${code}]: ${message}`
+  console.error(logMessage, { details, hint })
+  console.error(new Error(logMessage))
+
+  const sanitizedHeaderMessage = message.slice(0, 200).replace(/[\r\n]+/g, ' ')
+
+  return NextResponse.json(
+    {
+      error: `Automation cron failed at ${step}`,
+      step,
+      code,
+      message,
+      ...(details ? { details } : {}),
+      ...(hint ? { hint } : {}),
+    },
+    {
+      status,
+      headers: {
+        'x-cron-error-step': step,
+        'x-cron-error-code': code,
+        'x-cron-error-message': sanitizedHeaderMessage,
+      },
+    },
+  )
+}
+
 /**
  * Drain due `automation_pending_executions` rows. Meant to be hit
  * on a schedule (external scheduler / pinger) — requires a shared
@@ -22,26 +88,23 @@ export async function GET(request: Request) {
   }
 
   // Pre-flight check: ensure required Supabase credentials exist in the environment
-  const hasUrl = Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL?.trim())
-  const hasServiceKey = Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY?.trim())
+  const rawUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL
+  const rawKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY
+  const hasUrl = Boolean(rawUrl?.trim())
+  const hasServiceKey = Boolean(rawKey?.trim())
+
   if (!hasUrl || !hasServiceKey) {
     const missing = [
-      !hasUrl ? 'NEXT_PUBLIC_SUPABASE_URL' : null,
-      !hasServiceKey ? 'SUPABASE_SERVICE_ROLE_KEY' : null,
+      !hasUrl ? 'NEXT_PUBLIC_SUPABASE_URL/SUPABASE_URL' : null,
+      !hasServiceKey ? 'SUPABASE_SERVICE_ROLE_KEY/SUPABASE_SERVICE_KEY' : null,
     ]
       .filter(Boolean)
       .join(', ')
 
-    console.error('[automations-cron] Missing required environment variables:', {
-      hasUrl,
-      hasServiceKey,
-      missing,
+    return cronErrorResponse(500, 'env_validation', {
+      code: 'MISSING_ENV',
+      message: `Server misconfiguration: missing ${missing}`,
     })
-
-    return NextResponse.json(
-      { error: `Server misconfiguration: missing ${missing}` },
-      { status: 500 },
-    )
   }
 
   try {
@@ -52,9 +115,10 @@ export async function GET(request: Request) {
     try {
       expired = await expireAwaitingReplies()
     } catch (expireErr) {
-      console.error('[automations-cron] expireAwaitingReplies failed:', {
-        error: expireErr instanceof Error ? expireErr.message : String(expireErr),
-      })
+      console.error(
+        '[automations-cron] [expire_awaiting_replies]: non-fatal error expiring old runs:',
+        expireErr instanceof Error ? expireErr.message : String(expireErr),
+      )
       // Non-fatal: do not block draining pending executions if expiring replies fails
     }
 
@@ -68,20 +132,7 @@ export async function GET(request: Request) {
       .limit(50)
 
     if (error) {
-      console.error('[automations-cron] Database query error on automation_pending_executions:', {
-        code: error.code,
-        message: error.message,
-        details: error.details,
-        hint: error.hint,
-      })
-      return NextResponse.json(
-        {
-          error: 'Failed to query due executions',
-          code: error.code,
-          message: error.message,
-        },
-        { status: 500 },
-      )
+      return cronErrorResponse(500, 'query_due_executions', error)
     }
 
     if (!due || due.length === 0) {
@@ -100,11 +151,9 @@ export async function GET(request: Request) {
           .maybeSingle()
 
         if (claimErr) {
-          console.error('[automations-cron] Failed to claim execution row:', {
-            rowId: row.id,
-            code: claimErr.code,
-            message: claimErr.message,
-          })
+          console.error(
+            `[automations-cron] [claim_row] [${claimErr.code}]: Failed to claim row ${row.id}: ${claimErr.message}`,
+          )
           continue
         }
         if (!claim) continue
@@ -123,24 +172,15 @@ export async function GET(request: Request) {
         })
         processed++
       } catch (rowErr) {
-        console.error('[automations-cron] Error processing pending execution row:', {
-          rowId: row.id,
-          error: rowErr instanceof Error ? rowErr.message : String(rowErr),
-        })
+        console.error(
+          `[automations-cron] [resume_row]: Error processing pending execution row ${row.id}:`,
+          rowErr instanceof Error ? rowErr.message : String(rowErr),
+        )
       }
     }
 
     return NextResponse.json({ processed, expired })
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    const stack = err instanceof Error ? err.stack : undefined
-    console.error('[automations-cron] Unexpected error during execution:', {
-      message,
-      stack,
-    })
-    return NextResponse.json(
-      { error: 'Internal automation cron failure', message },
-      { status: 500 },
-    )
+    return cronErrorResponse(500, 'handler_execution', err instanceof Error ? err : String(err))
   }
 }

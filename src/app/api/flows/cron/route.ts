@@ -3,6 +3,61 @@ import { supabaseAdmin } from '@/lib/flows/admin-client'
 import { resolveFallbackPolicy } from '@/lib/flows/fallback'
 import { authenticateCronRequest } from '@/lib/cron/auth'
 
+interface ErrorWithPostgrestFields {
+  code?: string
+  message: string
+  details?: string | null
+  hint?: string | null
+}
+
+function cronErrorResponse(
+  status: number,
+  step: string,
+  error: ErrorWithPostgrestFields | Error | string,
+) {
+  const code =
+    typeof error === 'object' && 'code' in error && error.code
+      ? String(error.code)
+      : error instanceof Error
+        ? error.name || 'ERROR'
+        : 'ERROR'
+
+  const message =
+    typeof error === 'string'
+      ? error
+      : error instanceof Error
+        ? error.message
+        : error.message || 'Unknown error'
+
+  const details = typeof error === 'object' && 'details' in error ? error.details : undefined
+  const hint = typeof error === 'object' && 'hint' in error ? error.hint : undefined
+
+  const logMessage = `[flows-cron] [${step}] [${code}]: ${message}`
+  console.error(logMessage, { details, hint })
+  console.error(new Error(logMessage))
+
+  const sanitizedHeaderMessage = message.slice(0, 200).replace(/[\r\n]+/g, ' ')
+
+  return NextResponse.json(
+    {
+      error: `Flows cron failed at ${step}`,
+      step,
+      code,
+      message,
+      ...(details ? { details } : {}),
+      ...(hint ? { hint } : {}),
+    },
+    {
+      status,
+      headers: {
+        'x-cron-error-step': step,
+        'x-cron-error-code': code,
+        'x-cron-error-message': sanitizedHeaderMessage,
+      },
+    },
+  )
+}
+
 /**
  * Sweep abandoned active flow runs.
  *
@@ -10,21 +65,6 @@ import { authenticateCronRequest } from '@/lib/cron/auth'
  * to compute the staleness cutoff (default 24h), then marks any run
  * past its cutoff as `timed_out`. Writes a matching `flow_run_events`
  * row for the audit trail.
- *
- * Without this sweep, a customer who abandons a flow mid-conversation
- * keeps a row in `idx_one_active_run_per_contact` (the partial unique
- * index on `flow_runs WHERE status='active'`) forever — blocking any
- * new triggers for them. The cron is therefore not optional.
- *
- * Auth: re-uses `AUTOMATION_CRON_SECRET` so operators only have one
- * secret to provision. The two endpoints (`/api/automations/cron`
- * and this one) are independent operations; we keep them on separate
- * URLs so one failing doesn't block the other.
- *
- * Hosting: hit on a schedule (external scheduler / pinger).
- * A 5-minute interval is more than enough for a 24h timeout
- * default; once per hour would also be acceptable for low-volume
- * tenants.
  */
 export async function GET(request: Request) {
   const auth = authenticateCronRequest(request)
@@ -33,26 +73,23 @@ export async function GET(request: Request) {
   }
 
   // Pre-flight check: ensure required Supabase credentials exist
-  const hasUrl = Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL?.trim())
-  const hasServiceKey = Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY?.trim())
+  const rawUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL
+  const rawKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY
+  const hasUrl = Boolean(rawUrl?.trim())
+  const hasServiceKey = Boolean(rawKey?.trim())
+
   if (!hasUrl || !hasServiceKey) {
     const missing = [
-      !hasUrl ? 'NEXT_PUBLIC_SUPABASE_URL' : null,
-      !hasServiceKey ? 'SUPABASE_SERVICE_ROLE_KEY' : null,
+      !hasUrl ? 'NEXT_PUBLIC_SUPABASE_URL/SUPABASE_URL' : null,
+      !hasServiceKey ? 'SUPABASE_SERVICE_ROLE_KEY/SUPABASE_SERVICE_KEY' : null,
     ]
       .filter(Boolean)
       .join(', ')
 
-    console.error('[flows-cron] Missing required environment variables:', {
-      hasUrl,
-      hasServiceKey,
-      missing,
+    return cronErrorResponse(500, 'env_validation', {
+      code: 'MISSING_ENV',
+      message: `Server misconfiguration: missing ${missing}`,
     })
-
-    return NextResponse.json(
-      { error: `Server misconfiguration: missing ${missing}` },
-      { status: 500 },
-    )
   }
 
   try {
@@ -70,16 +107,7 @@ export async function GET(request: Request) {
       .eq('status', 'active')
 
     if (error) {
-      console.error('[flows-cron] active-run scan failed:', {
-        code: error.code,
-        message: error.message,
-        details: error.details,
-        hint: error.hint,
-      })
-      return NextResponse.json(
-        { error: 'Failed to scan active runs', code: error.code, message: error.message },
-        { status: 500 },
-      )
+      return cronErrorResponse(500, 'active_run_scan', error)
     }
     if (!runs?.length) return NextResponse.json({ swept: 0 })
 
@@ -116,10 +144,9 @@ export async function GET(request: Request) {
           .select('id')
 
         if (updateErr) {
-          console.error('[flows-cron] Failed to time out flow run:', {
-            runId: r.id,
-            error: updateErr.message,
-          })
+          console.error(
+            `[flows-cron] [time_out_run] [${updateErr.code}]: Failed to time out flow run ${r.id}: ${updateErr.message}`,
+          )
           continue
         }
 
@@ -135,24 +162,15 @@ export async function GET(request: Request) {
           swept += 1
         }
       } catch (runErr) {
-        console.error('[flows-cron] Error processing flow run:', {
-          runId: r.id,
-          error: runErr instanceof Error ? runErr.message : String(runErr),
-        })
+        console.error(
+          `[flows-cron] [process_run]: Error processing flow run ${r.id}:`,
+          runErr instanceof Error ? runErr.message : String(runErr),
+        )
       }
     }
 
     return NextResponse.json({ swept })
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    const stack = err instanceof Error ? err.stack : undefined
-    console.error('[flows-cron] Unexpected error during execution:', {
-      message,
-      stack,
-    })
-    return NextResponse.json(
-      { error: 'Internal flows cron failure', message },
-      { status: 500 },
-    )
+    return cronErrorResponse(500, 'handler_execution', err instanceof Error ? err : String(err))
   }
 }

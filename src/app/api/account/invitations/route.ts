@@ -66,16 +66,13 @@ const t = getT("Api");
 //
 //   When `ALLOWED_INVITE_HOSTS` is set (comma-separated hostnames),
 //   we validate the derived host against the list. Anything not
-//   on the list falls through to the wacrm.tech fallback with a
+//   on the list falls through to the app domain fallback with a
 //   loud console.warn. Operators who care about this attack
 //   surface should set this to their canonical hostnames; everyone
-//   else gets today's permissive behavior.
+//   else gets permissive behavior.
 //
-// Previous implementation hard-defaulted to `https://wacrm.tech`
-// (the docs/marketing site, a different repo). Forks that didn't
-// set `NEXT_PUBLIC_SITE_URL` got invite links pointing at the
-// marketing site, which 404s on `/join/<token>`. This resolution
-// chain removes the foot-gun.
+// Resolution chain safely falls back to NEXT_PUBLIC_APP_URL or app.wattomation.com
+// to guarantee invite links resolve to the active application.
 function parseAllowedHosts(): readonly string[] | null {
   const raw = process.env.ALLOWED_INVITE_HOSTS?.trim();
   if (!raw) return null;
@@ -131,10 +128,10 @@ function getBaseUrl(request: Request): string {
     );
   } else {
     console.warn(
-      "[POST /api/account/invitations] could not derive base URL from request; falling back to marketing domain",
+      "[POST /api/account/invitations] could not derive base URL from request; falling back to app domain",
     );
   }
-  return "https://wacrm.tech";
+  return process.env.NEXT_PUBLIC_APP_URL || "https://app.wattomation.com";
 }
 
 const MAX_LABEL_LEN = 80;

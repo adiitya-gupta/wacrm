@@ -1,8 +1,8 @@
-# wacrm MCP server
+# Wattomation MCP Server
 
 A [Model Context Protocol](https://modelcontextprotocol.io) server for
-**[wacrm](https://github.com/ArnasDon/wacrm)** — the self-hostable
-WhatsApp CRM. It lets MCP clients (Claude Desktop, Claude Code, Cursor,
+**Wattomation by OPSIYS** — enterprise WhatsApp CRM and AI automation platform.
+It lets MCP clients (Claude Desktop, Claude Code, Cursor,
 and others) drive your CRM in natural language:
 
 > "How many conversations are still open?"

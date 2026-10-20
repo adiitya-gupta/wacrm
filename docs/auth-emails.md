@@ -68,8 +68,8 @@ ADDITIONAL_REDIRECT_URLS=https://crm.example.com/**,http://localhost:3000/**
 
 (Older setups name these `GOTRUE_SITE_URL` and `GOTRUE_URI_ALLOW_LIST`.)
 Restart the auth container afterwards. A self-hosted stack whose `.env`
-still has the example `SITE_URL=http://localhost:3000` produces exactly
-the symptom in [issue #595](https://github.com/ArnasDon/wacrm/issues/595).
+still has the example `SITE_URL=http://localhost:3000` produces the
+symptom where confirmation and reset links redirect to localhost.
 
 ### Local Supabase CLI (`supabase start`)
 

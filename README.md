@@ -1,187 +1,119 @@
-# wacrm — CRM Template for WhatsApp
+# Wattomation by OPSIYS
 
-> Self-hostable CRM template for WhatsApp® — shared inbox, contacts,
-> sales pipelines, broadcasts, and no-code automations. Fork it, brand
-> it, host it.
+> Enterprise WhatsApp CRM, Autonomous AI Agents, Visual Funnels & Meeting Scheduling Platform.
 
-<p align="center">
-  <a href="https://www.hostinger.com/web-apps-hosting?REFERRALCODE=WACRMHOST">
-    <img src="./.github/assets/hostinger-deploy.png" alt="Ship your Node.js app in one click — Deploy to Hostinger" width="900">
-  </a>
-</p>
-
-[![License: MIT](https://img.shields.io/badge/License-MIT-violet.svg)](./LICENSE)
-[![CI](https://github.com/ArnasDon/wacrm/actions/workflows/ci.yml/badge.svg)](https://github.com/ArnasDon/wacrm/actions/workflows/ci.yml)
 [![Next.js 16](https://img.shields.io/badge/Next.js-16-black?logo=nextdotjs)](https://nextjs.org)
 [![Supabase](https://img.shields.io/badge/Supabase-Postgres%20%2B%20Auth-3ecf8e?logo=supabase)](https://supabase.com)
-[![Stars](https://img.shields.io/github/stars/ArnasDon/wacrm?style=social)](https://github.com/ArnasDon/wacrm/stargazers)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5-blue?logo=typescript)](https://www.typescriptlang.org)
+[![Tailwind CSS](https://img.shields.io/badge/Tailwind-CSS%20v4-38bdf8?logo=tailwindcss)](https://tailwindcss.com)
+[![License: MIT](https://img.shields.io/badge/License-MIT-violet.svg)](./LICENSE)
 
-The marketing site and self-host docs live in a separate repo:
-[ArnasDon/wacrm-site](https://github.com/ArnasDon/wacrm-site)
-([wacrm.tech](https://wacrm.tech)). This repo is the product —
-clone or fork it to run your own CRM.
+**Wattomation by OPSIYS** transforms WhatsApp into a full-funnel customer relationship management, sales automation, and AI-powered support engine. Engineered with enterprise security, complete tenant isolation, and modern cloud scalability.
 
-## What you get out of the box
+---
 
-- **Shared inbox** on the official WhatsApp Business API — multiple
-  agents working one number, per-conversation assignment, status, and
-  notes.
-- **Contacts + tags + custom fields**, CSV import, deduplication.
-- **Sales pipelines** (Kanban) with deals linked to conversations.
-- **Broadcasts** with Meta-approved templates, delivery + read
-  tracking, per-recipient variable substitution.
-- **No-code automations** — triggers on inbound messages, new
-  contacts, keywords, or schedule; conditional branches, waits,
-  tags, webhooks. Visual builder.
-- **AI reply assistant** — bring your own OpenAI or Anthropic key
-  (stored encrypted; no per-seat AI fee, your data stays yours).
-  One-click AI-drafted replies in the inbox, plus an optional
-  auto-reply bot with a per-conversation cap and clean human handoff.
-  Add a **knowledge base** (FAQs, policies, product docs) and it
-  answers from your own content — hybrid retrieval (Postgres full-text,
-  or semantic pgvector when an embeddings key is set).
-- **Real-time dashboard** — response times, daily volume, pipeline
-  value, cross-module activity feed.
-- **Team accounts** — invite teammates by link, role-based access
-  (owner / admin / agent / viewer), ownership transfer. Every install
-  is account-scoped, so one shared inbox can be staffed by a whole
-  team. Solo use stays single-user with zero setup.
-- **Account management** — email, password, avatar, global sign-out.
-- **Public REST API** (`/api/v1`) with scoped, revocable API keys —
-  build your own automations on top of your CRM. See
-  [docs/public-api.md](./docs/public-api.md).
-- **MCP server** — drive your CRM from Claude, Cursor, and other AI
-  assistants over the [Model Context Protocol](https://modelcontextprotocol.io).
-  Read-only by default, opt-in writes. See [docs/mcp.md](./docs/mcp.md)
-  (server in [`mcp-server/`](./mcp-server)).
+## Capabilities & Architecture
 
-## Why fork this?
+### 1. Unified WhatsApp Shared Inbox
+- Multi-agent collaboration on official WhatsApp Business API numbers.
+- Real-time message streaming, conversation assignment, custom tags, and internal notes.
+- Inbound media mirroring and rich message rendering (audio notes, documents, location, interactive list & button replies).
 
-This is a **template**, not a product. Forking means you get:
+### 2. Autonomous AI Agents & Knowledge Bases
+- Bring-your-own-key (BYOK) AI integrations supporting OpenAI (GPT-4o) and Anthropic (Claude 3.5).
+- Custom knowledge base retrieval via Postgres pgvector and full-text search.
+- Clean human handoff protocols and per-conversation auto-reply safety controls.
 
-- **Full ownership** — your code, your Supabase project, your domain,
-  your data. No SaaS lock-in, no seat pricing, no trust dance.
-- **Full customisation** — add the fields your team needs, remove the
-  modules you don't, redesign anything. The stack is boring on
-  purpose (Next.js + Supabase + Tailwind) so the learning curve is
-  short.
-- **Zero ops to start** — [Hostinger](https://www.hostinger.com/web-apps-hosting?REFERRALCODE=WACRMHOST)
-  Managed Node.js deploys a fork in a few clicks. No Docker, no
-  Kubernetes, no infra team needed.
-  ([See below ↓](#-deploy-on-hostinger-recommended))
-- **Real security primitives** — token encryption (AES-256-GCM), RLS
-  on every table, HMAC-verified webhooks, CSP, rate limiting, CI
-  typecheck/build on every PR.
+### 3. Visual Pipelines & Deal Management
+- Multi-stage Kanban pipeline boards linked directly to WhatsApp conversations.
+- Real-time pipeline analytics, deal value tracking, and conversion velocity metrics.
 
-Not a framework. Not an SDK. A concrete, working CRM you can stand up
-in an afternoon and make yours.
+### 4. Broadcast Campaigns & Meta Templates
+- Meta-approved template management, submission, and sync directly from the dashboard.
+- High-concurrency broadcast engine with personalized variable substitution and delivery/read tracking.
 
-## Quick start
+### 5. Visual No-Code Automations
+- Trigger automations on inbound messages, keyword detection, contact creation, or schedule.
+- Conditional branching, wait timers, webhook dispatching, and dynamic tag assignments.
+
+### 6. Website Integrations & Event SDK
+- Client-side tracking script (`/sdk/wacrm.js`) for capturing user events, page views, and form submissions.
+- Real-time webhook ingestion triggering automated WhatsApp follow-ups.
+
+### 7. Meeting Scheduling & Calendar Sync
+- Natural language datetime parsing for inbound appointment requests.
+- Bi-directional Google Calendar availability checking and conflict-free booking.
+
+### 8. Enterprise Governance & Security
+- Fail-closed authorization with multi-tenant Supabase Row Level Security (RLS).
+- Pending-by-default registration with Platform Admin approval workflows.
+- AES-256-GCM encryption for stored API keys and webhook secrets.
+- Scoped, revocable REST API keys (`/api/v1`) with distributed rate limiting.
+
+---
+
+## Quick Start (Local Development)
+
+### Prerequisites
+- Node.js `>=22.12.0`
+- A Supabase project (Postgres, Auth, Storage)
+- A Meta Cloud API (WhatsApp Business) account
+
+### Setup
 
 ```bash
-# Fork on GitHub first: https://github.com/ArnasDon/wacrm → Fork
-git clone https://github.com/<your-username>/wacrm.git
-cd wacrm
+# 1. Clone the repository
+git clone https://github.com/adiitya-gupta/wattomation-by-opsiys.git
+cd wattomation-by-opsiys
+
+# 2. Install dependencies
 npm install
-cp .env.local.example .env.local   # fill in Supabase + Meta creds
+
+# 3. Configure environment variables
+cp .env.local.example .env.local
+# Edit .env.local with your Supabase URL, anon key, and Meta secrets
+
+# 4. Start the development server
 npm run dev
 ```
 
-Open <http://localhost:3000>. You'll be redirected to `/login` (or
-`/dashboard` if already signed in).
+Visit [http://localhost:3000](http://localhost:3000) to view your workspace.
 
-The UI ships in English, Korean, Brazilian Portuguese and Spanish — set
-`NEXT_PUBLIC_APP_LOCALE` to `en`, `ko`, `pt` or `es` in `.env.local`
-(catalogues live in `messages/`).
+---
 
-Prefer containers? See [docs/docker.md](./docs/docker.md) for the
-Dockerfile + Docker Compose setup.
+## Production Deployment (Vercel)
 
-## 🚀 Deploy on Hostinger (recommended)
+Wattomation is optimized for deployment on **Vercel** with **Supabase**.
 
-<p align="center">
-  <a href="https://www.hostinger.com/web-apps-hosting?REFERRALCODE=WACRMHOST">
-    <img src="./.github/assets/hostinger-deploy.png" alt="Ship your Node.js app in one click — Deploy to Hostinger" width="1000">
-  </a>
-</p>
-<p align="center">
-  <a href="https://wacrm.tech/docs/deployment-hostinger">
-    <img src="https://img.shields.io/badge/Step--by--step_guide-wacrm.tech%2Fdocs-111?style=for-the-badge" alt="Step-by-step guide" height="44">
-  </a>
-</p>
+1. Connect your repository (`adiitya-gupta/wattomation-by-opsiys`) to Vercel.
+2. Ensure Node.js version is set to `22.x` in Project Settings.
+3. Configure the required environment variables in your Vercel Project Settings:
+   - `NEXT_PUBLIC_SUPABASE_URL`
+   - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+   - `SUPABASE_SERVICE_ROLE_KEY`
+   - `ENCRYPTION_KEY` (64 hex characters)
+   - `CRON_SECRET`
+   - `PLATFORM_ADMIN_EMAILS`
+   - `UPSTASH_REDIS_REST_URL` & `UPSTASH_REDIS_REST_TOKEN`
+4. Deploy the project. Vercel automatically configures the scheduled cron jobs defined in `vercel.json`.
 
-**wacrm is built to run on [Hostinger](https://www.hostinger.com/web-apps-hosting?REFERRALCODE=WACRMHOST).**
-It's the path we test, document, and recommend — and the fastest way
-to get a production-grade CRM live without owning a VPS or a
-Kubernetes cluster.
+---
 
-### Why Hostinger?
+## Tech Stack
 
-| | |
-|---|---|
-| **One-click Git deploy** | Connect your fork, push to `main`, Hostinger builds and ships it. No SSH, no Docker, no CI to wire up — this repo's own `main` deploys this way. |
-| **Managed Node.js** | Next.js 16 (App Router, server actions, ISR) runs out of the box on [Premium, Business, and Cloud](https://www.hostinger.com/web-apps-hosting?REFERRALCODE=WACRMHOST) shared plans. You don't manage Node versions, processes, or reverse proxies. |
-| **Free SSL + free domain** | Automatic Let's Encrypt on your custom domain (or a free one included with annual plans). HTTPS is on by default — required for the WhatsApp Business webhook. |
-| **Global CDN + LiteSpeed** | Static assets cached at the edge, dynamic routes served from LiteSpeed. Snappy dashboards out of the box, no Cloudflare setup required. |
-| **Env vars + logs in hPanel** | Set `SUPABASE_*`, `WHATSAPP_*`, and `ENCRYPTION_KEY` from the panel — no `.env` on the server. Live application logs in the same UI. |
-| **DDoS protection + daily backups** | Built-in, no add-ons. The webhook endpoint is a public target — having protection at the edge matters. |
-| **Cheaper than a VPS** | Plans start at a few dollars a month — order-of-magnitude less than a comparable managed Node.js host, and you don't pay extra for the database (that's Supabase). |
-| **24/7 human support** | Live chat support in 20+ languages — useful when your CRM is the thing your team relies on to talk to customers. |
+- **Framework**: Next.js 16 (App Router, Turbopack)
+- **Runtime**: React 19, Node.js 22
+- **Language**: TypeScript (Strict Mode)
+- **Styling**: Tailwind CSS v4, Lucide Icons
+- **Database & Auth**: Supabase (Postgres, Auth, RLS, Storage, Vector)
+- **Messaging**: Meta Cloud API (WhatsApp Business Platform)
+- **Rate Limiting**: Upstash Redis (Distributed fail-closed)
+- **Model Context Protocol**: MCP Server in `mcp-server/`
 
-### The 60-second version
-
-1. **Fork** this repo on GitHub.
-2. In **hPanel → Websites → Create**, pick **Node.js** and connect
-   your fork.
-3. Paste your Supabase + Meta env vars into hPanel.
-4. Push to `main`. Hostinger builds and serves it. Done.
-
-Full walkthrough with screenshots:
-**[wacrm.tech/docs/deployment-hostinger](https://wacrm.tech/docs/deployment-hostinger)**.
-
-> _Note: wacrm is MIT-licensed and runs anywhere Node.js does
-> (Vercel, Railway, your own VPS). Hostinger is recommended, not
-> required._
-
-## Documentation
-
-Full self-host documentation — Supabase migrations, WhatsApp Business
-API config, and production deploy — lives at
-**[wacrm.tech/docs](https://wacrm.tech/docs)**
-(source: [ArnasDon/wacrm-site](https://github.com/ArnasDon/wacrm-site)).
-
-Key pages:
-- [Getting started](https://wacrm.tech/docs/getting-started)
-- [Supabase setup](https://wacrm.tech/docs/supabase-setup)
-- [WhatsApp setup](https://wacrm.tech/docs/whatsapp-setup)
-- [Environment variables](https://wacrm.tech/docs/environment-variables)
-- [Deploy on Hostinger](https://wacrm.tech/docs/deployment-hostinger)
-- [Architecture](https://wacrm.tech/docs/architecture)
-- [Troubleshooting](https://wacrm.tech/docs/troubleshooting)
-- [WhatsApp connection troubleshooting](./docs/whatsapp-connection-troubleshooting.md)
-  — what each "Save Configuration" error means, and the Meta code /
-  trace id to quote to Meta support
-- [Several WABAs on one deployment](./docs/multi-waba.md) — one Meta
-  App or several; how `META_APP_SECRET` takes a comma-separated list
-- [Auth emails](./docs/auth-emails.md) — what Supabase must allow so
-  confirmation and password-reset links come back to *your* domain
-  instead of `localhost:3000`, and how `/auth/callback` handles them
-
-## Stack
-
-- **App** — Next.js 16 (App Router), React 19, TypeScript, Tailwind v4.
-- **Data** — Supabase (Postgres + Auth + Storage + RLS).
-- **WhatsApp** — Meta Cloud API (official WhatsApp Business API).
-
-## Contributing
-
-This is a template, not a collaborative product — the expected flow is
-fork → customise → deploy, **not** upstream contribution. Bug reports
-and security issues are welcome; feature PRs often belong in your fork
-rather than here. Details in
-[`CONTRIBUTING.md`](./CONTRIBUTING.md) and
-[`.github/SECURITY.md`](./.github/SECURITY.md).
+---
 
 ## License
 
-[MIT](./LICENSE). Fork it, brand it, host it.
+This project is licensed under the [MIT License](./LICENSE).
+
+**Wattomation** is a brand of **OPSIYS**. All rights reserved.

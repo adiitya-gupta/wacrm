@@ -21,8 +21,8 @@ import { authenticateCronRequest } from '@/lib/cron/auth'
  * and this one) are independent operations; we keep them on separate
  * URLs so one failing doesn't block the other.
  *
- * Hosting: hit on a schedule (Vercel Cron / GitHub Actions / external
- * pinger). A 5-minute interval is more than enough for a 24h timeout
+ * Hosting: hit on a schedule (external scheduler / pinger).
+ * A 5-minute interval is more than enough for a 24h timeout
  * default; once per hour would also be acceptable for low-volume
  * tenants.
  */
@@ -32,68 +32,127 @@ export async function GET(request: Request) {
     return auth.response!
   }
 
-  const admin = supabaseAdmin()
-  const now = new Date()
+  // Pre-flight check: ensure required Supabase credentials exist
+  const hasUrl = Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL?.trim())
+  const hasServiceKey = Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY?.trim())
+  if (!hasUrl || !hasServiceKey) {
+    const missing = [
+      !hasUrl ? 'NEXT_PUBLIC_SUPABASE_URL' : null,
+      !hasServiceKey ? 'SUPABASE_SERVICE_ROLE_KEY' : null,
+    ]
+      .filter(Boolean)
+      .join(', ')
 
-  // Pull all currently-active runs along with their parent flow's
-  // fallback_policy. Joined in one query — the small set of active
-  // runs per tenant keeps this cheap.
-  const { data: runs, error } = await admin
-    .from('flow_runs')
-    .select(
-      'id, flow_id, user_id, contact_id, last_advanced_at, flows ( fallback_policy )',
+    console.error('[flows-cron] Missing required environment variables:', {
+      hasUrl,
+      hasServiceKey,
+      missing,
+    })
+
+    return NextResponse.json(
+      { error: `Server misconfiguration: missing ${missing}` },
+      { status: 500 },
     )
-    .eq('status', 'active')
-
-  if (error) {
-    console.error('[flows-cron] active-run scan failed:', error.message)
-    return NextResponse.json({ error: error.message }, { status: 500 })
-  }
-  if (!runs?.length) return NextResponse.json({ swept: 0 })
-
-  type Row = {
-    id: string
-    flow_id: string
-    user_id: string
-    contact_id: string | null
-    last_advanced_at: string
-    flows: { fallback_policy: unknown } | { fallback_policy: unknown }[] | null
   }
 
-  let swept = 0
-  for (const r of runs as Row[]) {
-    const flowsField = Array.isArray(r.flows) ? r.flows[0] : r.flows
-    const policy = resolveFallbackPolicy(flowsField?.fallback_policy ?? null)
-    const lastAdvanced = new Date(r.last_advanced_at)
-    const ageHours = (now.getTime() - lastAdvanced.getTime()) / (1000 * 60 * 60)
-    if (ageHours < policy.on_timeout_hours) continue
+  try {
+    const admin = supabaseAdmin()
+    const now = new Date()
 
-    // Mark timed_out — guarded by the precondition `status='active'`
-    // so concurrent advance from a late inbound doesn't overwrite a
-    // legitimate update.
-    const { data: updated } = await admin
+    // Pull all currently-active runs along with their parent flow's
+    // fallback_policy. Joined in one query — the small set of active
+    // runs per tenant keeps this cheap.
+    const { data: runs, error } = await admin
       .from('flow_runs')
-      .update({
-        status: 'timed_out',
-        ended_at: now.toISOString(),
-        end_reason: 'stale_sweep',
-      })
-      .eq('id', r.id)
+      .select(
+        'id, flow_id, user_id, contact_id, last_advanced_at, flows ( fallback_policy )',
+      )
       .eq('status', 'active')
-      .select('id')
 
-    if (Array.isArray(updated) && updated.length > 0) {
-      await admin.from('flow_run_events').insert({
-        flow_run_id: r.id,
-        event_type: 'timeout',
-        payload: {
-          age_hours: Math.round(ageHours * 10) / 10,
-          policy_hours: policy.on_timeout_hours,
-        },
+    if (error) {
+      console.error('[flows-cron] active-run scan failed:', {
+        code: error.code,
+        message: error.message,
+        details: error.details,
+        hint: error.hint,
       })
-      swept += 1
+      return NextResponse.json(
+        { error: 'Failed to scan active runs', code: error.code, message: error.message },
+        { status: 500 },
+      )
     }
-  }
+    if (!runs?.length) return NextResponse.json({ swept: 0 })
 
-  return NextResponse.json({ swept })
+    type Row = {
+      id: string
+      flow_id: string
+      user_id: string
+      contact_id: string | null
+      last_advanced_at: string
+      flows: { fallback_policy: unknown } | { fallback_policy: unknown }[] | null
+    }
+
+    let swept = 0
+    for (const r of runs as Row[]) {
+      try {
+        const flowsField = Array.isArray(r.flows) ? r.flows[0] : r.flows
+        const policy = resolveFallbackPolicy(flowsField?.fallback_policy ?? null)
+        const lastAdvanced = new Date(r.last_advanced_at)
+        const ageHours = (now.getTime() - lastAdvanced.getTime()) / (1000 * 60 * 60)
+        if (ageHours < policy.on_timeout_hours) continue
+
+        // Mark timed_out — guarded by the precondition `status='active'`
+        // so concurrent advance from a late inbound doesn't overwrite a
+        // legitimate update.
+        const { data: updated, error: updateErr } = await admin
+          .from('flow_runs')
+          .update({
+            status: 'timed_out',
+            ended_at: now.toISOString(),
+            end_reason: 'stale_sweep',
+          })
+          .eq('id', r.id)
+          .eq('status', 'active')
+          .select('id')
+
+        if (updateErr) {
+          console.error('[flows-cron] Failed to time out flow run:', {
+            runId: r.id,
+            error: updateErr.message,
+          })
+          continue
+        }
+
+        if (Array.isArray(updated) && updated.length > 0) {
+          await admin.from('flow_run_events').insert({
+            flow_run_id: r.id,
+            event_type: 'timeout',
+            payload: {
+              age_hours: Math.round(ageHours * 10) / 10,
+              policy_hours: policy.on_timeout_hours,
+            },
+          })
+          swept += 1
+        }
+      } catch (runErr) {
+        console.error('[flows-cron] Error processing flow run:', {
+          runId: r.id,
+          error: runErr instanceof Error ? runErr.message : String(runErr),
+        })
+      }
+    }
+
+    return NextResponse.json({ swept })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    const stack = err instanceof Error ? err.stack : undefined
+    console.error('[flows-cron] Unexpected error during execution:', {
+      message,
+      stack,
+    })
+    return NextResponse.json(
+      { error: 'Internal flows cron failure', message },
+      { status: 500 },
+    )
+  }
 }

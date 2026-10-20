@@ -20,6 +20,8 @@ describe('GET /api/flows/cron', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     process.env.AUTOMATION_CRON_SECRET = SECRET
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://test.supabase.co'
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'test_service_role_key_secret'
 
     const queryChain: Record<string, unknown> = {}
     queryChain.select = mocks.select.mockReturnValue(queryChain)
@@ -65,22 +67,69 @@ describe('GET /api/flows/cron', () => {
     expect(res.status).toBe(401)
   })
 
-  it('authorizes successfully and sweeps stale runs when x-cron-secret is valid', async () => {
+  it('fails with 500 when NEXT_PUBLIC_SUPABASE_URL is missing', async () => {
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL
+
     const req = new Request('http://localhost/api/flows/cron', {
       method: 'GET',
       headers: { 'x-cron-secret': SECRET },
     })
 
     const res = await GET(req)
-    expect(res.status).toBe(200)
-    const body = (await res.json()) as { swept: number }
-    expect(body).toEqual({ swept: 0 })
+    expect(res.status).toBe(500)
+    const body = (await res.json()) as { error: string }
+    expect(body.error).toContain('NEXT_PUBLIC_SUPABASE_URL')
   })
 
-  it('authorizes successfully when valid secret is in Authorization: Bearer header', async () => {
+  it('fails with 500 when SUPABASE_SERVICE_ROLE_KEY is missing', async () => {
+    delete process.env.SUPABASE_SERVICE_ROLE_KEY
+
     const req = new Request('http://localhost/api/flows/cron', {
       method: 'GET',
-      headers: { authorization: `Bearer ${SECRET}` },
+      headers: { 'x-cron-secret': SECRET },
+    })
+
+    const res = await GET(req)
+    expect(res.status).toBe(500)
+    const body = (await res.json()) as { error: string }
+    expect(body.error).toContain('SUPABASE_SERVICE_ROLE_KEY')
+  })
+
+  it('fails with 500 and exposes structured error when Supabase query returns an error', async () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const queryChain: Record<string, unknown> = {}
+    queryChain.select = vi.fn().mockReturnValue(queryChain)
+    queryChain.eq = vi.fn().mockResolvedValue({
+      data: null,
+      error: { code: 'PGRST205', message: "Could not find table 'flow_runs'" },
+    })
+
+    mocks.supabaseAdmin.mockReturnValue({
+      from: vi.fn().mockReturnValue(queryChain),
+    })
+
+    const req = new Request('http://localhost/api/flows/cron', {
+      method: 'GET',
+      headers: { 'x-cron-secret': SECRET },
+    })
+
+    const res = await GET(req)
+    expect(res.status).toBe(500)
+    const body = (await res.json()) as { error: string; code?: string }
+    expect(body.code).toBe('PGRST205')
+    expect(consoleSpy).toHaveBeenCalledWith(
+      expect.stringContaining('[flows-cron] active-run scan failed'),
+      expect.objectContaining({ code: 'PGRST205' }),
+    )
+
+    consoleSpy.mockRestore()
+  })
+
+  it('authorizes successfully and sweeps stale runs when x-cron-secret is valid', async () => {
+    const req = new Request('http://localhost/api/flows/cron', {
+      method: 'GET',
+      headers: { 'x-cron-secret': SECRET },
     })
 
     const res = await GET(req)

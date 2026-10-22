@@ -3,6 +3,32 @@ import { requirePlatformAdmin } from '@/lib/admin/auth';
 import { toErrorResponse } from '@/lib/auth/account';
 import { supabaseAdmin } from '@/lib/flows/admin-client';
 
+interface AccountRow {
+  id: string;
+  name: string;
+  created_at: string;
+  approval_status?: string | null;
+  is_suspended?: boolean | null;
+  approved_at?: string | null;
+  approved_by?: string | null;
+  rejected_at?: string | null;
+  suspended_at?: string | null;
+  status_reason?: string | null;
+  onboarding_completed?: boolean | null;
+  owner_user_id?: string | null;
+}
+
+interface ProfileRow {
+  user_id: string;
+  account_id: string | null;
+  full_name: string | null;
+  email: string | null;
+  created_at?: string | null;
+  role?: string | null;
+  account_role?: string | null;
+  approval_status?: string | null;
+}
+
 export async function GET(request: Request) {
   try {
     await requirePlatformAdmin();
@@ -13,7 +39,7 @@ export async function GET(request: Request) {
     const searchQuery = searchParams.get('q')?.trim().toLowerCase() || '';
 
     // Fetch all accounts
-    let { data: accounts, error: accErr } = await db
+    const initialAccRes = await db
       .from('accounts')
       .select(`
         id,
@@ -30,6 +56,8 @@ export async function GET(request: Request) {
         owner_user_id
       `)
       .order('created_at', { ascending: false });
+    let accounts: AccountRow[] = (initialAccRes.data as AccountRow[] | null) || [];
+    let accErr = initialAccRes.error;
 
     if (accErr && (accErr.code === '42703' || accErr.message?.includes('approval_status'))) {
       const fallback = await db
@@ -43,7 +71,7 @@ export async function GET(request: Request) {
           owner_user_id
         `)
         .order('created_at', { ascending: false });
-      accounts = fallback.data?.map((a: any) => ({
+      accounts = ((fallback.data as (Omit<AccountRow, 'approval_status'> & { is_suspended?: boolean | null })[] | null) || []).map((a) => ({
         ...a,
         approval_status: a.is_suspended ? 'suspended' : 'approved',
         approved_at: null,
@@ -51,7 +79,7 @@ export async function GET(request: Request) {
         rejected_at: null,
         suspended_at: null,
         status_reason: null,
-      })) || [];
+      }));
       accErr = fallback.error;
     }
 
@@ -63,20 +91,22 @@ export async function GET(request: Request) {
     const accountIds = allAccounts.map((a) => a.id);
 
     // Fetch profiles for these accounts
-    let { data: profiles, error: profErr } = await db
+    const initialProfRes = await db
       .from('profiles')
       .select('user_id, account_id, full_name, email, created_at, role, account_role, approval_status')
       .in('account_id', accountIds);
+    let profiles: ProfileRow[] = (initialProfRes.data as ProfileRow[] | null) || [];
+    const profErr = initialProfRes.error;
 
     if (profErr && (profErr.code === '42703' || profErr.message?.includes('approval_status'))) {
       const fallbackProf = await db
         .from('profiles')
         .select('user_id, account_id, full_name, email, created_at, role, account_role')
         .in('account_id', accountIds);
-      profiles = fallbackProf.data?.map((p: any) => ({ ...p, approval_status: 'approved' })) || [];
+      profiles = ((fallbackProf.data as ProfileRow[] | null) || []).map((p) => ({ ...p, approval_status: 'approved' }));
     }
 
-    const profilesByAccount = new Map<string, any[]>();
+    const profilesByAccount = new Map<string, ProfileRow[]>();
     for (const p of profiles || []) {
       if (p.account_id) {
         const list = profilesByAccount.get(p.account_id) || [];

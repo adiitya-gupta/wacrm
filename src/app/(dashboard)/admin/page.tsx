@@ -73,12 +73,59 @@ interface AuditLogRecord {
   target_account_id: string;
   target_email?: string | null;
   reason?: string | null;
-  metadata?: any;
+  metadata?: Record<string, unknown> | null;
   created_at: string;
 }
 
+interface PlatformMetrics {
+  total_tenants?: number;
+  managed_tenants?: number;
+  self_serve_tenants?: number;
+  active_subscriptions?: number;
+  total_messages_period?: number;
+  current_period?: string;
+  active_ai_agents?: number;
+  [key: string]: unknown;
+}
+
+interface TenantRecord {
+  id: string;
+  name: string;
+  owner_email?: string;
+  acquisition_model?: string;
+  subscription?: { plan_id?: string; [key: string]: unknown } | null;
+  whatsapp_connected?: boolean;
+  is_suspended?: boolean;
+  [key: string]: unknown;
+}
+
+interface AdminSubscriptionRecord {
+  id: string;
+  account_id: string;
+  accounts?: { name?: string } | null;
+  acquisition_model?: string;
+  custom_pricing_amount?: number | null;
+  status?: string;
+  custom_contract_notes?: string | null;
+  [key: string]: unknown;
+}
+
+interface CreatedTenantResult {
+  account: {
+    id: string;
+    website_integration: {
+      site_key: string;
+    };
+  };
+  client_invitation: {
+    invite_url: string;
+  };
+}
+
+type AdminTab = 'access' | 'audit' | 'metrics' | 'tenants' | 'contracts' | 'health';
+
 export default function AdminPage() {
-  const [activeTab, setActiveTab] = useState<'access' | 'audit' | 'metrics' | 'tenants' | 'contracts' | 'health'>('access');
+  const [activeTab, setActiveTab] = useState<AdminTab>('access');
   const [loading, setLoading] = useState(true);
   const [authorized, setAuthorized] = useState(true);
 
@@ -106,13 +153,13 @@ export default function AdminPage() {
   const [loadingAudit, setLoadingAudit] = useState(false);
 
   // Platform Metrics
-  const [metrics, setMetrics] = useState<any>(null);
+  const [metrics, setMetrics] = useState<PlatformMetrics | null>(null);
 
   // Tenants & Subscriptions
-  const [tenants, setTenants] = useState<any[]>([]);
+  const [tenants, setTenants] = useState<TenantRecord[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [modelFilter, setModelFilter] = useState('all');
-  const [subscriptions, setSubscriptions] = useState<any[]>([]);
+  const [subscriptions, setSubscriptions] = useState<AdminSubscriptionRecord[]>([]);
 
   // Create Client Modal State
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
@@ -124,7 +171,7 @@ export default function AdminPage() {
   const [newCustomPricing, setNewCustomPricing] = useState('14999');
   const [newContractNotes, setNewContractNotes] = useState('Full service WhatsApp automation & workflow management');
   const [creatingTenant, setCreatingTenant] = useState(false);
-  const [createdTenantResult, setCreatedTenantResult] = useState<any>(null);
+  const [createdTenantResult, setCreatedTenantResult] = useState<CreatedTenantResult | null>(null);
 
   // Record Offline Payment Modal State
   const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
@@ -263,8 +310,8 @@ export default function AdminPage() {
       setSelectedAccount(null);
       fetchAccounts();
       fetchAuditLogs();
-    } catch (err: any) {
-      toast.error(err.message);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Action failed');
     } finally {
       setExecutingAction(false);
     }
@@ -284,8 +331,8 @@ export default function AdminPage() {
         prev.map((t) => (t.id === accountId ? { ...t, is_suspended: !currentSuspended } : t))
       );
       fetchAccounts();
-    } catch (err: any) {
-      toast.error(err.message);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to update tenant status');
     }
   };
 
@@ -317,8 +364,8 @@ export default function AdminPage() {
       toast.success('Managed workspace provisioned successfully!');
       setCreatedTenantResult(data);
       fetchData();
-    } catch (err: any) {
-      toast.error(err.message);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to provision tenant');
     } finally {
       setCreatingTenant(false);
     }
@@ -342,8 +389,8 @@ export default function AdminPage() {
       toast.success('Offline payment recorded and subscription confirmed');
       setIsPaymentModalOpen(false);
       fetchData();
-    } catch (err: any) {
-      toast.error(err.message);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to record payment');
     } finally {
       setRecordingPayment(false);
     }
@@ -372,7 +419,7 @@ export default function AdminPage() {
   const filteredTenants = tenants.filter((t) => {
     const matchesSearch =
       t.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      t.owner_email.toLowerCase().includes(searchQuery.toLowerCase());
+      (t.owner_email || '').toLowerCase().includes(searchQuery.toLowerCase());
     const matchesModel =
       modelFilter === 'all' || t.acquisition_model === modelFilter;
     return matchesSearch && matchesModel;
@@ -408,7 +455,7 @@ export default function AdminPage() {
       </div>
 
       {/* Tabs */}
-      <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as any)}>
+      <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as AdminTab)}>
         <TabsList className="grid w-full grid-cols-6 lg:w-[720px]">
           <TabsTrigger value="access" className="flex items-center gap-1.5">
             <UserCheck className="h-4 w-4" />
@@ -844,7 +891,7 @@ export default function AdminPage() {
                       <Button
                         size="sm"
                         variant="outline"
-                        onClick={() => handleToggleSuspend(t.id, t.is_suspended)}
+                        onClick={() => handleToggleSuspend(t.id, Boolean(t.is_suspended))}
                         className={`text-xs ${t.is_suspended ? 'text-emerald-500' : 'text-red-400'}`}
                       >
                         {t.is_suspended ? 'Unsuspend' : 'Suspend'}
@@ -1126,7 +1173,7 @@ export default function AdminPage() {
                   <Label>Acquisition Model</Label>
                   <Select
                     value={newAcquisitionModel}
-                    onValueChange={(v: any) => setNewAcquisitionModel(v)}
+                    onValueChange={(v) => setNewAcquisitionModel(v as 'managed' | 'self_serve')}
                   >
                     <SelectTrigger className="mt-1">
                       <SelectValue />

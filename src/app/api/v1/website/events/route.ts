@@ -85,10 +85,11 @@ export async function POST(request: Request) {
     );
 
     return NextResponse.json(result, { status: 200 });
-  } catch (err: any) {
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Internal server error processing website event';
     console.error('[/api/v1/website/events] Ingestion error:', err);
     return NextResponse.json(
-      { error: err.message || 'Internal server error processing website event' },
+      { error: message },
       { status: 500 }
     );
   }

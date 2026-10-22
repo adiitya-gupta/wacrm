@@ -468,11 +468,12 @@ export async function processWebsiteEvent(
             });
           }
         }
-      } catch (actionErr: any) {
+      } catch (actionErr) {
+        const errorMsg = actionErr instanceof Error ? actionErr.message : String(actionErr);
         dispatchedActions.push({
           action_type: rule.action_type,
           success: false,
-          error: actionErr.message || String(actionErr),
+          error: errorMsg,
         });
       }
     }
@@ -492,13 +493,14 @@ export async function processWebsiteEvent(
       status: 'processed',
       dispatchedActions,
     };
-  } catch (err: any) {
+  } catch (err) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
     console.error('[website-event] Processing error:', err);
     await db
       .from('website_event_logs')
       .update({
         status: 'failed',
-        error_message: err.message || String(err),
+        error_message: errorMsg,
         dispatched_actions: dispatchedActions,
       })
       .eq('id', logId);
@@ -508,7 +510,7 @@ export async function processWebsiteEvent(
       logId,
       status: 'failed',
       dispatchedActions,
-      error: err.message,
+      error: errorMsg,
     };
   }
 }

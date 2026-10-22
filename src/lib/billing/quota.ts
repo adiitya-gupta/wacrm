@@ -16,6 +16,12 @@ export interface QuotaCheckResult {
   reason?: string;
 }
 
+interface AccountSubscriptionRow {
+  plan_id?: string | null;
+  status?: string | null;
+  current_period_end?: string | null;
+}
+
 /**
  * Checks whether an account is allowed to consume a specific resource under its current plan.
  * Returns { allowed: true } or { allowed: false, reason: "..." }.
@@ -28,7 +34,7 @@ export async function checkAccountQuota(
 ): Promise<QuotaCheckResult> {
   try {
     // 1. Fetch account subscription status
-    let sub: any = null;
+    let sub: AccountSubscriptionRow | null = null;
     try {
       const res = await db
         .from('subscriptions')

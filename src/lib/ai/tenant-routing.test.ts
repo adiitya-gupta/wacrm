@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import type { SupabaseClient } from '@supabase/supabase-js'
 import { isOpsiysAccount } from './auto-reply'
 import { processOpsiysLeadConversation } from './opsiys-agent'
 import type { AiConfig } from './types'
@@ -27,7 +28,7 @@ describe('Tenant-Specific AI Routing & Cross-Account Isolation', () => {
     const mockDb = {
       from: vi.fn(),
       rpc: vi.fn(),
-    } as any
+    } as unknown as SupabaseClient
 
     const mockConfig: AiConfig = {
       provider: 'openai',

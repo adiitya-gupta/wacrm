@@ -1,6 +1,17 @@
 import { NextResponse } from 'next/server';
 import { requireRole, toErrorResponse } from '@/lib/auth/account';
 
+interface OnboardingMetadata {
+  industry?: string;
+  website?: string;
+  timezone?: string;
+  business_description?: string;
+  primary_goals?: string[];
+  agent_name?: string;
+  system_prompt?: string;
+  [key: string]: unknown;
+}
+
 export async function GET() {
   try {
     const ctx = await requireRole('agent');
@@ -43,7 +54,7 @@ export async function GET() {
     ]);
 
     const account = accRes.data;
-    const meta = (account?.metadata as Record<string, any>) || {};
+    const meta = (account?.metadata as OnboardingMetadata | null) || {};
     const whatsappConnected = !!(waRes.data?.is_active && waRes.data?.phone_number_id);
     const aiConfigured = !!aiRes.data?.is_active;
     const websiteConnected = !!websiteRes.data?.site_key;
@@ -100,9 +111,9 @@ export async function POST(request: Request) {
       .eq('id', ctx.accountId)
       .single();
 
-    const existingMeta = (existingAccount?.metadata as Record<string, any>) || {};
+    const existingMeta = (existingAccount?.metadata as OnboardingMetadata | null) || {};
 
-    const newMeta: Record<string, any> = {
+    const newMeta: OnboardingMetadata = {
       ...existingMeta,
     };
 

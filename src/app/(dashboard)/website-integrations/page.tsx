@@ -46,8 +46,17 @@ import type {
   WebsiteEventLog,
 } from '@/types/website-integrations';
 
+type IntegrationTab = 'setup' | 'rules' | 'logs' | 'test';
+type ActionType = 'send_whatsapp_message' | 'send_template' | 'assign_tag';
+
+interface TestEventResult {
+  success?: boolean;
+  error?: string;
+  [key: string]: unknown;
+}
+
 export default function WebsiteIntegrationsPage() {
-  const [activeTab, setActiveTab] = useState<'setup' | 'rules' | 'logs' | 'test'>('setup');
+  const [activeTab, setActiveTab] = useState<IntegrationTab>('setup');
   const [loading, setLoading] = useState(true);
 
   // Credentials
@@ -67,7 +76,7 @@ export default function WebsiteIntegrationsPage() {
   // Rule creation modal
   const [isRuleModalOpen, setIsRuleModalOpen] = useState(false);
   const [newEventType, setNewEventType] = useState('lead.submitted');
-  const [newActionType, setNewActionType] = useState<'send_whatsapp_message' | 'send_template' | 'assign_tag'>('send_whatsapp_message');
+  const [newActionType, setNewActionType] = useState<ActionType>('send_whatsapp_message');
   const [newMessageBody, setNewMessageBody] = useState('Hi {{name}}! Thank you for reaching out. We received your inquiry and will be in touch shortly.');
   const [newTagName, setNewTagName] = useState('Website Lead');
   const [creatingRule, setCreatingRule] = useState(false);
@@ -78,7 +87,7 @@ export default function WebsiteIntegrationsPage() {
   const [testName, setTestName] = useState('Jane Smith');
   const [testEmail, setTestEmail] = useState('jane@example.com');
   const [testRunning, setTestRunning] = useState(false);
-  const [testResult, setTestResult] = useState<any>(null);
+  const [testResult, setTestResult] = useState<TestEventResult | null>(null);
 
   const fetchIntegrationData = useCallback(async () => {
     setLoading(true);
@@ -133,8 +142,8 @@ export default function WebsiteIntegrationsPage() {
 
       if (!res.ok) throw new Error('Failed to save domains');
       toast.success('Allowed domains updated');
-    } catch (err: any) {
-      toast.error(err.message);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to save domains');
     } finally {
       setSavingDomains(false);
     }
@@ -143,7 +152,7 @@ export default function WebsiteIntegrationsPage() {
   const handleCreateRule = async () => {
     setCreatingRule(true);
     try {
-      const config: any = {};
+      const config: Record<string, string> = {};
       if (newActionType === 'send_whatsapp_message') {
         config.message_body = newMessageBody;
       } else if (newActionType === 'assign_tag') {
@@ -168,8 +177,8 @@ export default function WebsiteIntegrationsPage() {
       toast.success('Automation rule created');
       setIsRuleModalOpen(false);
       fetchIntegrationData();
-    } catch (err: any) {
-      toast.error(err.message);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to create rule');
     } finally {
       setCreatingRule(false);
     }
@@ -183,8 +192,8 @@ export default function WebsiteIntegrationsPage() {
       if (!res.ok) throw new Error('Failed to delete rule');
       toast.success('Rule removed');
       setRules((prev) => prev.filter((r) => r.id !== ruleId));
-    } catch (err: any) {
-      toast.error(err.message);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to delete rule');
     }
   };
 
@@ -211,8 +220,8 @@ export default function WebsiteIntegrationsPage() {
         toast.error(data.error || 'Test event failed');
       }
       fetchIntegrationData();
-    } catch (err: any) {
-      toast.error(err.message);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Test event failed');
     } finally {
       setTestRunning(false);
     }
@@ -239,7 +248,7 @@ export default function WebsiteIntegrationsPage() {
       </div>
 
       {/* Tabs */}
-      <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as any)}>
+      <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as IntegrationTab)}>
         <TabsList className="grid w-full grid-cols-4 lg:w-[480px]">
           <TabsTrigger value="setup">
             <Code2 className="mr-1.5 h-4 w-4" /> Setup & SDK
@@ -432,7 +441,7 @@ export default function WebsiteIntegrationsPage() {
 
                   <div>
                     <Label>Action to Execute</Label>
-                    <Select value={newActionType} onValueChange={(v: any) => setNewActionType(v)}>
+                    <Select value={newActionType} onValueChange={(v) => setNewActionType(v as ActionType)}>
                       <SelectTrigger className="mt-1">
                         <SelectValue />
                       </SelectTrigger>

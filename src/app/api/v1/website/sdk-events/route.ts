@@ -79,10 +79,11 @@ export async function POST(request: Request) {
     );
 
     return NextResponse.json(result, { status: 200, headers: CORS_HEADERS });
-  } catch (err: any) {
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Internal error';
     console.error('[/api/v1/website/sdk-events] Ingestion error:', err);
     return NextResponse.json(
-      { error: err.message || 'Internal error' },
+      { error: message },
       { status: 500, headers: CORS_HEADERS }
     );
   }

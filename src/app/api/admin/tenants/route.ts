@@ -3,6 +3,16 @@ import { requirePlatformAdmin } from '@/lib/admin/auth';
 import { toErrorResponse } from '@/lib/auth/account';
 import { supabaseAdmin } from '@/lib/flows/admin-client';
 
+interface TenantAccountRow {
+  id: string;
+  name: string;
+  created_at: string;
+  is_suspended: boolean | null;
+  acquisition_model?: string | null;
+  onboarding_completed: boolean | null;
+  owner_user_id: string | null;
+}
+
 export async function GET(request: Request) {
   try {
     await requirePlatformAdmin();
@@ -43,7 +53,7 @@ export async function GET(request: Request) {
           owner_user_id
         `)
         .order('created_at', { ascending: false });
-      accounts = fallback.data?.map((a: any) => ({ ...a, acquisition_model: 'self_serve' })) || [];
+      accounts = ((fallback.data as Omit<TenantAccountRow, 'acquisition_model'>[] | null) || []).map((a) => ({ ...a, acquisition_model: 'self_serve' }));
       error = fallback.error;
     }
     if (error) {

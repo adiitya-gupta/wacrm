@@ -4,6 +4,16 @@ import { findActiveKeyByHash } from '../api-keys/store';
 import { generateApiKey, hashApiKey } from '../api-keys/keys';
 import { supabaseAdmin } from '../flows/admin-client';
 
+interface MockSupabaseAdmin {
+  from: ReturnType<typeof vi.fn>;
+  _mocks: {
+    fromMock: ReturnType<typeof vi.fn>;
+    selectMock: ReturnType<typeof vi.fn>;
+    eqMock: ReturnType<typeof vi.fn>;
+    maybeSingleMock: ReturnType<typeof vi.fn>;
+  };
+}
+
 // Mock supabaseAdmin
 vi.mock('../flows/admin-client', () => {
   const maybeSingleMock = vi.fn();
@@ -97,7 +107,7 @@ describe('Security Audit — Adversarial Attacks & Guard Verifications', () => {
 
   describe('Adversarial Threat 2: Suspended Account API Key Invalidation', () => {
     it('findActiveKeyByHash rejects keys belonging to suspended accounts', async () => {
-      const db = supabaseAdmin() as any;
+      const db = supabaseAdmin() as unknown as MockSupabaseAdmin;
       const key = generateApiKey();
       const hash = hashApiKey(key.plaintext);
 
@@ -130,7 +140,7 @@ describe('Security Audit — Adversarial Attacks & Guard Verifications', () => {
     });
 
     it('findActiveKeyByHash rejects keys belonging to rejected or pending accounts', async () => {
-      const db = supabaseAdmin() as any;
+      const db = supabaseAdmin() as unknown as MockSupabaseAdmin;
       const key = generateApiKey();
       const hash = hashApiKey(key.plaintext);
 
@@ -161,7 +171,7 @@ describe('Security Audit — Adversarial Attacks & Guard Verifications', () => {
     });
 
     it('findActiveKeyByHash allows active keys for approved, non-suspended accounts', async () => {
-      const db = supabaseAdmin() as any;
+      const db = supabaseAdmin() as unknown as MockSupabaseAdmin;
       const key = generateApiKey();
       const hash = hashApiKey(key.plaintext);
 
@@ -197,7 +207,7 @@ describe('Security Audit — Adversarial Attacks & Guard Verifications', () => {
       try {
         // @ts-expect-error mutating readonly for test
         process.env.NODE_ENV = 'production';
-        const db = supabaseAdmin() as any;
+        const db = supabaseAdmin() as unknown as MockSupabaseAdmin;
         const key = generateApiKey();
         const hash = hashApiKey(key.plaintext);
 

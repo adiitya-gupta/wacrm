@@ -4,6 +4,21 @@ import { toErrorResponse } from '@/lib/auth/account';
 import { supabaseAdmin } from '@/lib/flows/admin-client';
 import { isApprovalStatus, type ApprovalStatus } from '@/lib/auth/approval';
 
+interface TargetAccountRow {
+  id: string;
+  name: string;
+  approval_status?: string | null;
+  is_suspended: boolean | null;
+  owner_user_id: string | null;
+}
+
+interface UpdatedAccountRow {
+  id: string;
+  name: string;
+  is_suspended: boolean | null;
+  approval_status?: string | null;
+}
+
 export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -19,11 +34,13 @@ export async function POST(
     const db = supabaseAdmin();
 
     // Verify account exists
-    let { data: targetAccount, error: fetchErr } = await db
+    const initialFetch = await db
       .from('accounts')
       .select('id, name, approval_status, is_suspended, owner_user_id')
       .eq('id', accountId)
       .single();
+    let targetAccount: TargetAccountRow | null = initialFetch.data as TargetAccountRow | null;
+    let fetchErr = initialFetch.error;
 
     if (fetchErr && (fetchErr.code === '42703' || fetchErr.message?.includes('approval_status'))) {
       const fallback = await db
@@ -31,7 +48,7 @@ export async function POST(
         .select('id, name, is_suspended, owner_user_id')
         .eq('id', accountId)
         .single();
-      targetAccount = fallback.data ? ({ ...fallback.data, approval_status: 'approved' } as any) : null;
+      targetAccount = fallback.data ? { ...fallback.data, approval_status: 'approved' } : null;
       fetchErr = fallback.error;
     }
 
@@ -103,12 +120,14 @@ export async function POST(
     }
 
     // 1. Update accounts table
-    let { data: updatedAccount, error: updateErr } = await db
+    const initialUpdate = await db
       .from('accounts')
       .update(updates)
       .eq('id', accountId)
       .select('id, name, is_suspended')
       .single();
+    let updatedAccount: UpdatedAccountRow | null = initialUpdate.data as UpdatedAccountRow | null;
+    let updateErr = initialUpdate.error;
 
     if (updateErr && (updateErr.code === '42703' || updateErr.message?.includes('approval_status'))) {
       const basicUpdates = { is_suspended: updates.is_suspended };
@@ -118,7 +137,7 @@ export async function POST(
         .eq('id', accountId)
         .select('id, name, is_suspended')
         .single();
-      updatedAccount = fallbackUpdate.data ? ({ ...fallbackUpdate.data, approval_status: newStatus } as any) : null;
+      updatedAccount = fallbackUpdate.data ? { ...fallbackUpdate.data, approval_status: newStatus } : null;
       updateErr = fallbackUpdate.error;
     }
 

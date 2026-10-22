@@ -43,9 +43,11 @@ const GOAL_OPTIONS = [
   { id: 'website_capture', label: 'Website Inbound Lead Capture', desc: 'Connect website forms directly to WhatsApp follow-ups' },
 ];
 
+type Step = 1 | 2 | 3 | 4 | 5 | 6 | 7;
+
 export default function OnboardingPage() {
   const router = useRouter();
-  const [step, setStep] = useState<1 | 2 | 3 | 4 | 5 | 6 | 7>(1);
+  const [step, setStep] = useState<Step>(1);
   const [loading, setLoading] = useState(false);
   const [savingProgress, setSavingProgress] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -130,8 +132,8 @@ export default function OnboardingPage() {
 
       if (!res.ok) throw new Error('Failed to save progress');
       if (!silent) toast.success('Progress saved');
-    } catch (err: any) {
-      if (!silent) toast.error(err.message);
+    } catch (err) {
+      if (!silent) toast.error(err instanceof Error ? err.message : 'Failed to save progress');
     } finally {
       setSavingProgress(false);
     }
@@ -146,7 +148,7 @@ export default function OnboardingPage() {
       await saveCurrentProgress(true);
     }
     if (step < 7) {
-      setStep((prev) => (prev + 1) as any);
+      setStep((prev) => (prev + 1) as Step);
     }
   };
 
@@ -177,8 +179,8 @@ export default function OnboardingPage() {
 
       toast.success('Workspace configured successfully! Welcome to Wattomation by OPSIYS.');
       router.push('/dashboard');
-    } catch (err: any) {
-      toast.error(err.message);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to complete onboarding');
     } finally {
       setLoading(false);
     }
@@ -231,7 +233,7 @@ export default function OnboardingPage() {
                 <button
                   type="button"
                   onClick={() => {
-                    if (s.num < step) setStep(s.num as any);
+                    if (s.num < step) setStep(s.num as Step);
                   }}
                   disabled={s.num > step}
                   className={`flex h-9 w-9 items-center justify-center rounded-full border transition-all ${
@@ -574,7 +576,7 @@ export default function OnboardingPage() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => setStep((prev) => (prev - 1) as any)}
+                onClick={() => setStep((prev) => (prev - 1) as Step)}
                 className="text-xs"
               >
                 <ArrowLeft className="mr-1.5 h-3.5 w-3.5" /> Back

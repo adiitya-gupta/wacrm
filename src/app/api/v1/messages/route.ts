@@ -117,7 +117,7 @@ export async function POST(request: Request) {
     let sendTemplateName = typeof template?.name === 'string' ? template.name : null;
     let sendTemplateLanguage = typeof template?.language === 'string' ? template.language : null;
     let sendTemplateParams = templateParams;
-    let sendTemplateMessageParams = templateMessageParams;
+    const sendTemplateMessageParams = templateMessageParams;
 
     if (sendMessageType === 'text') {
       const { data: recentInbound } = await ctx.supabase

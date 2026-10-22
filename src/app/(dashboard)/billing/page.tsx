@@ -19,6 +19,28 @@ import { Progress } from '@/components/ui/progress';
 import { toast } from 'sonner';
 import type { Subscription, SubscriptionPlan, AccountUsageSummary, BillingInvoice } from '@/types/billing';
 
+interface RazorpayResponse {
+  razorpay_payment_id: string;
+  razorpay_order_id: string;
+  razorpay_signature: string;
+}
+
+interface RazorpayOptions {
+  key: string;
+  amount: number;
+  currency: string;
+  name: string;
+  description: string;
+  order_id: string;
+  handler: (response: RazorpayResponse) => Promise<void> | void;
+}
+
+interface RazorpayInstance {
+  open: () => void;
+}
+
+type RazorpayConstructor = new (options: RazorpayOptions) => RazorpayInstance;
+
 export default function BillingPage() {
   const [loading, setLoading] = useState(true);
   const [sub, setSub] = useState<Subscription | null>(null);
@@ -84,15 +106,19 @@ export default function BillingPage() {
       }
 
       // If Razorpay checkout is configured in client, open Razorpay modal
-      if (typeof window !== 'undefined' && (window as any).Razorpay) {
-        const rzp = new (window as any).Razorpay({
+      const razorpayCtor = typeof window !== 'undefined'
+        ? (window as unknown as { Razorpay?: RazorpayConstructor }).Razorpay
+        : undefined;
+
+      if (razorpayCtor) {
+        const rzp = new razorpayCtor({
           key: data.key_id,
           amount: data.amount,
           currency: data.currency,
           name: 'Wattomation by OPSIYS',
           description: `Subscription: ${planId}`,
           order_id: data.order_id,
-          handler: async function (response: any) {
+          handler: async function (response: RazorpayResponse) {
             toast.loading('Verifying payment...');
             const verifyRes = await fetch('/api/billing/subscription', {
               method: 'POST',
@@ -117,8 +143,8 @@ export default function BillingPage() {
       } else {
         toast.info(`Checkout order created: ${data.order_id}. Razorpay client script loading.`);
       }
-    } catch (err: any) {
-      toast.error(err.message);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to complete checkout');
     } finally {
       setUpgradingPlan(null);
     }

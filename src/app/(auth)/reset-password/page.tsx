@@ -35,7 +35,6 @@ type Status = "checking" | "ready" | "expired" | "done";
 
 export default function ResetPasswordPage() {
   const t = useTranslations("ResetPasswordPage");
-  const supabase = createClient();
 
   const [status, setStatus] = useState<Status>("checking");
   const [password, setPassword] = useState("");
@@ -45,15 +44,40 @@ export default function ResetPasswordPage() {
 
   useEffect(() => {
     let cancelled = false;
-    // The callback wrote the session cookies server-side; the browser
-    // client reads them here. No user → the link didn't yield a session.
-    supabase.auth.getUser().then(({ data: { user } }) => {
-      if (!cancelled) setStatus(user ? "ready" : "expired");
-    });
+
+    const checkSession = async () => {
+      try {
+        const supabase = createClient();
+        const {
+          data: { user },
+          error: authError,
+        } = await supabase.auth.getUser();
+
+        if (!cancelled) {
+          if (authError || !user) {
+            setStatus("expired");
+          } else {
+            setStatus("ready");
+          }
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setStatus("expired");
+          setError(
+            err instanceof Error
+              ? err.message
+              : "Failed to initialize password reset client"
+          );
+        }
+      }
+    };
+
+    void checkSession();
+
     return () => {
       cancelled = true;
     };
-  }, [supabase]);
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -70,14 +94,24 @@ export default function ResetPasswordPage() {
     }
 
     setSaving(true);
-    const { error } = await supabase.auth.updateUser({ password });
-    setSaving(false);
+    try {
+      const supabase = createClient();
+      const { error: updateError } = await supabase.auth.updateUser({ password });
+      setSaving(false);
 
-    if (error) {
-      setError(error.message);
-      return;
+      if (updateError) {
+        setError(updateError.message);
+        return;
+      }
+      setStatus("done");
+    } catch (err) {
+      setSaving(false);
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Failed to initialize password reset client"
+      );
     }
-    setStatus("done");
   };
 
   if (status === "checking") {
@@ -107,6 +141,11 @@ export default function ResetPasswordPage() {
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-3">
+            {error && (
+              <div className="rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-400">
+                {error}
+              </div>
+            )}
             <Link href="/forgot-password">
               <Button className="h-10 w-full bg-primary text-primary-foreground hover:bg-primary/90">
                 {t("requestNewLink")}

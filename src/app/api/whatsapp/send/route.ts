@@ -38,9 +38,9 @@ export async function POST(request: Request) {
     // to DB"). RLS can't un-send that, so the role check belongs here.
     const { supabase, accountId, userId } = await requireRole('agent')
 
-    // Per-user rate limit. Bucket key is scoped to this route so
-    // `/broadcast` has an independent budget.
-    const limit = await checkRateLimit(`send:${userId}`, RATE_LIMITS.send)
+    // Per-user and per-account rate limit. Bucket key is scoped to this route and account
+    // so `/broadcast` has an independent budget and tenants do not compete.
+    const limit = await checkRateLimit(`send:${accountId}:${userId}`, RATE_LIMITS.send)
     if (!limit.success) {
       return rateLimitResponse(limit)
     }

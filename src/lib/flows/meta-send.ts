@@ -156,6 +156,7 @@ export async function engineSendText(
   }
 
   const { error: msgErr } = await db.from('messages').insert({
+    account_id: args.accountId,
     conversation_id: args.conversationId,
     sender_type: 'bot',
     content_type: 'text',
@@ -278,6 +279,7 @@ export async function engineSendMedia(
   // list preview shows something meaningful when the user glances at it.
   const preview = args.caption?.trim() || `[${args.kind}]`
   const { error: msgErr } = await db.from('messages').insert({
+    account_id: args.accountId,
     conversation_id: args.conversationId,
     sender_type: 'bot',
     content_type: args.kind,
@@ -474,6 +476,7 @@ async function sendInteractiveViaMeta(
         }
 
   const { error: msgErr } = await db.from('messages').insert({
+    account_id: input.accountId,
     conversation_id: input.conversationId,
     sender_type: 'bot',
     content_type: 'interactive',

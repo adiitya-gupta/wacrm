@@ -112,4 +112,29 @@ describe('Platform Admin Authorization Guard', () => {
       process.env.PLATFORM_ADMIN_EMAILS = origEmails;
     }
   });
+
+  it('supports environment variable aliases like ADMIN_EMAILS and PLATFORM_OWNER_EMAIL', () => {
+    const origPlatform = process.env.PLATFORM_ADMIN_EMAILS;
+    const origAdmin = process.env.ADMIN_EMAILS;
+    const origOwner = process.env.PLATFORM_OWNER_EMAIL;
+
+    try {
+      delete process.env.PLATFORM_ADMIN_EMAILS;
+      process.env.ADMIN_EMAILS = 'ops-lead@opsiys.com';
+      process.env.PLATFORM_OWNER_EMAIL = 'founder@opsiys.com';
+
+      expect(isPlatformAdmin({ email: 'ops-lead@opsiys.com' })).toBe(true);
+      expect(isPlatformAdmin({ email: '  FOUNDER@OPSIYS.COM  ' })).toBe(true);
+      expect(isPlatformAdmin({ email: 'intruder@company.com' })).toBe(false);
+    } finally {
+      process.env.PLATFORM_ADMIN_EMAILS = origPlatform;
+      process.env.ADMIN_EMAILS = origAdmin;
+      process.env.PLATFORM_OWNER_EMAIL = origOwner;
+    }
+  });
+
+  it('authorizes canonical designated platform owner adityaofficial9918@gmail.com by default', () => {
+    expect(isPlatformAdmin({ email: 'adityaofficial9918@gmail.com' })).toBe(true);
+    expect(isPlatformAdmin({ email: '  ADITYAOFFICIAL9918@GMAIL.COM ' })).toBe(true);
+  });
 });

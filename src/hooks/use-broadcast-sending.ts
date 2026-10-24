@@ -360,6 +360,7 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
         ]),
       );
       const recipientRows = contacts.map((contact) => ({
+        account_id: broadcast.account_id,
         broadcast_id: broadcast.id,
         contact_id: contact.id,
         status: 'pending' as const,

@@ -4,12 +4,42 @@
  * Uses direct fetch to Google Calendar REST APIs with zero heavy dependencies.
  */
 
+import { encrypt, decrypt } from '@/lib/whatsapp/encryption';
+
 export interface GoogleCalendarTokens {
   access_token: string;
   refresh_token?: string;
   expiry_date?: number;
   token_type?: string;
   scope?: string;
+}
+
+/**
+ * Encrypt Google OAuth tokens at rest using AES-256-GCM.
+ */
+export function encryptGoogleTokens(tokens: GoogleCalendarTokens): string {
+  return encrypt(JSON.stringify(tokens));
+}
+
+/**
+ * Decrypt Google OAuth tokens from database storage.
+ * Handles both encrypted string formats and legacy unencrypted JSON objects gracefully.
+ */
+export function decryptGoogleTokens(raw: unknown): GoogleCalendarTokens | null {
+  if (!raw) return null;
+  if (typeof raw === 'string') {
+    try {
+      const decrypted = decrypt(raw);
+      return JSON.parse(decrypted) as GoogleCalendarTokens;
+    } catch (err) {
+      console.error('[google-calendar] failed to decrypt tokens:', err);
+      return null;
+    }
+  }
+  if (typeof raw === 'object' && raw !== null && 'access_token' in raw) {
+    return raw as GoogleCalendarTokens;
+  }
+  return null;
 }
 
 export interface GoogleCalendarEventInput {

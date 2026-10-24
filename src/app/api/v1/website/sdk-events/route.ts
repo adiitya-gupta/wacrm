@@ -1,8 +1,10 @@
 import { NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/flows/admin-client';
+import { checkRateLimit, RATE_LIMITS } from '@/lib/rate-limit';
 import {
   findIntegrationBySiteKey,
   processWebsiteEvent,
+  validateDomainOrigin,
 } from '@/lib/website-integrations/service';
 
 const CORS_HEADERS = {
@@ -32,6 +34,15 @@ export async function POST(request: Request) {
       );
     }
 
+    const clientIp = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown';
+    const ipRate = await checkRateLimit(`sdk-ip:${clientIp}`, RATE_LIMITS.publicApi);
+    if (!ipRate.success) {
+      return NextResponse.json(
+        { error: 'Too many requests. Please slow down.' },
+        { status: 429, headers: CORS_HEADERS }
+      );
+    }
+
     const db = supabaseAdmin();
     const integration = await findIntegrationBySiteKey(db, siteKey);
     if (!integration) {
@@ -39,6 +50,22 @@ export async function POST(request: Request) {
         { error: 'Invalid or inactive site key' },
         { status: 401, headers: CORS_HEADERS }
       );
+    }
+
+    if (integration.domain_whitelist && integration.domain_whitelist.length > 0) {
+      if (!origin) {
+        return NextResponse.json(
+          { error: 'Origin or Referer header required for SDK event ingestion' },
+          { status: 403, headers: CORS_HEADERS }
+        );
+      }
+      const originAllowed = validateDomainOrigin(origin, null, integration.domain_whitelist);
+      if (!originAllowed) {
+        return NextResponse.json(
+          { error: `Origin '${origin}' is not authorized in integration domain whitelist` },
+          { status: 403, headers: CORS_HEADERS }
+        );
+      }
     }
 
     const body = await request.json().catch(() => null);

@@ -4,8 +4,8 @@ import { loadSchedulingSettings } from './availability';
 import {
   createGoogleCalendarEvent,
   deleteGoogleCalendarEvent,
+  decryptGoogleTokens,
   getValidAccessToken,
-  type GoogleCalendarTokens,
 } from './google-calendar';
 
 export interface BookMeetingArgs {
@@ -126,15 +126,23 @@ export async function bookMeeting(
   // 2. Google Calendar sync if enabled
   if (settings.google_calendar_enabled) {
     try {
-      const { data: rawTokens } = await db
+      let tokenDb = db;
+      try {
+        const { supabaseAdmin } = await import('@/lib/ai/admin-client');
+        tokenDb = supabaseAdmin();
+      } catch {
+        // fallback to db in test environments
+      }
+
+      const { data: rawTokens } = await tokenDb
         .from('scheduling_settings')
         .select('google_calendar_tokens')
         .eq('account_id', accountId)
         .maybeSingle();
 
       if (rawTokens?.google_calendar_tokens) {
-        const tokens = rawTokens.google_calendar_tokens as GoogleCalendarTokens;
-        const validToken = await getValidAccessToken(tokens);
+        const tokens = decryptGoogleTokens(rawTokens.google_calendar_tokens);
+        const validToken = tokens ? await getValidAccessToken(tokens) : null;
 
         if (validToken) {
           const gEvent = await createGoogleCalendarEvent(validToken, {
@@ -306,15 +314,23 @@ export async function cancelMeeting(
   // Clean up Google Calendar event if exists
   if (meeting.calendar_event_id && meeting.calendar_provider === 'google_calendar') {
     try {
-      const { data: rawTokens } = await db
+      let tokenDb = db;
+      try {
+        const { supabaseAdmin } = await import('@/lib/ai/admin-client');
+        tokenDb = supabaseAdmin();
+      } catch {
+        // fallback to db in test environments
+      }
+
+      const { data: rawTokens } = await tokenDb
         .from('scheduling_settings')
         .select('google_calendar_tokens')
         .eq('account_id', accountId)
         .maybeSingle();
 
       if (rawTokens?.google_calendar_tokens) {
-        const tokens = rawTokens.google_calendar_tokens as GoogleCalendarTokens;
-        const validToken = await getValidAccessToken(tokens);
+        const tokens = decryptGoogleTokens(rawTokens.google_calendar_tokens);
+        const validToken = tokens ? await getValidAccessToken(tokens) : null;
         if (validToken) {
           await deleteGoogleCalendarEvent(validToken, meeting.calendar_event_id);
         }

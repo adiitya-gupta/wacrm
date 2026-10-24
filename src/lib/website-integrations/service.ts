@@ -234,15 +234,18 @@ export async function processWebsiteEvent(
   const { account_id, site_key, domain_whitelist } = integration;
 
   // 1. Domain origin check for SDK callers
-  if (options.source === 'sdk' && options.origin) {
+  if (options.source === 'sdk' && domain_whitelist && domain_whitelist.length > 0) {
+    if (!options.origin) {
+      throw new Error("Origin header is required for browser SDK event ingestion");
+    }
     const originAllowed = validateDomainOrigin(options.origin, null, domain_whitelist);
     if (!originAllowed) {
-      throw new Error(`Origin '${options.origin}' is not in the allowed domain whitelist`);
+      throw new Error(`Origin '${options.origin}' is not authorized in integration domain whitelist`);
     }
   }
 
-  // 2. Distributed Rate Limiting
-  const rateLimitKey = `site-event:${site_key}`;
+  // 2. Distributed Rate Limiting (isolated by tenant account and site)
+  const rateLimitKey = `site-event:${account_id}:${site_key}`;
   const rate = await checkRateLimit(rateLimitKey, RATE_LIMITS.publicApi);
   if (!rate.success) {
     throw new Error('Rate limit exceeded for this website integration. Please slow down requests.');

@@ -1,6 +1,10 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { SchedulingSettings, TimeSlot } from '@/types/meetings';
-import { getValidAccessToken, queryGoogleBusyPeriods, type GoogleCalendarTokens } from './google-calendar';
+import {
+  getValidAccessToken,
+  queryGoogleBusyPeriods,
+  decryptGoogleTokens,
+} from './google-calendar';
 
 export const DEFAULT_SCHEDULING_SETTINGS: Omit<SchedulingSettings, 'account_id'> = {
   meeting_duration_minutes: 15,
@@ -17,6 +21,9 @@ export const DEFAULT_SCHEDULING_SETTINGS: Omit<SchedulingSettings, 'account_id'>
   default_meeting_link: 'https://meet.google.com/new',
 };
 
+export const SCHEDULING_SETTINGS_PUBLIC_COLUMNS =
+  'id, account_id, meeting_duration_minutes, working_days, working_hours_start, working_hours_end, timezone, buffer_before_minutes, buffer_after_minutes, minimum_notice_hours, max_advance_days, google_calendar_enabled, google_calendar_email, default_meeting_link, created_at, updated_at';
+
 /**
  * Load scheduling settings for an account, creating or returning defaults if missing.
  */
@@ -26,7 +33,7 @@ export async function loadSchedulingSettings(
 ): Promise<SchedulingSettings> {
   const { data, error } = await db
     .from('scheduling_settings')
-    .select('*')
+    .select(SCHEDULING_SETTINGS_PUBLIC_COLUMNS)
     .eq('account_id', accountId)
     .maybeSingle();
 
@@ -109,14 +116,22 @@ export async function getAvailableSlots(
 
   // Fetch Google Calendar busy periods if enabled
   if (settings.google_calendar_enabled) {
-    const { data: rawRow } = await db
+    let tokenDb = db;
+    try {
+      const { supabaseAdmin } = await import('@/lib/ai/admin-client');
+      tokenDb = supabaseAdmin();
+    } catch {
+      // fallback to db in test environments
+    }
+
+    const { data: rawRow } = await tokenDb
       .from('scheduling_settings')
       .select('google_calendar_tokens')
       .eq('account_id', accountId)
       .maybeSingle();
 
-    if (rawRow?.google_calendar_tokens) {
-      const tokens = rawRow.google_calendar_tokens as GoogleCalendarTokens;
+    const tokens = decryptGoogleTokens(rawRow?.google_calendar_tokens);
+    if (tokens) {
       const validToken = await getValidAccessToken(tokens);
       if (validToken) {
         const gBusy = await queryGoogleBusyPeriods(

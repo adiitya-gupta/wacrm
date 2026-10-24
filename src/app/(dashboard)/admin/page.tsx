@@ -24,6 +24,7 @@ import {
   History,
   ShieldCheck,
   RotateCcw,
+  KeyRound,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -179,6 +180,31 @@ export default function AdminPage() {
   const [paymentAmount, setPaymentAmount] = useState('14999');
   const [paymentDesc, setPaymentDesc] = useState('Bank Wire Transfer');
   const [recordingPayment, setRecordingPayment] = useState(false);
+  const [resettingPasswordId, setResettingPasswordId] = useState<string | null>(null);
+
+  const handleInitiatePasswordReset = async (accountId: string, ownerEmail?: string) => {
+    setResettingPasswordId(accountId);
+    try {
+      const res = await fetch(`/api/admin/accounts/${accountId}/reset-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to initiate password reset');
+
+      if (data.reset_link) {
+        await navigator.clipboard.writeText(data.reset_link);
+        toast.success(`Password reset link generated and copied to clipboard for ${data.email || ownerEmail || 'account owner'}!`);
+      } else {
+        toast.success(`Password reset link sent to ${data.email || ownerEmail || 'account owner'}.`);
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to initiate password reset');
+    } finally {
+      setResettingPasswordId(null);
+    }
+  };
 
   const fetchAccounts = useCallback(async () => {
     try {
@@ -683,6 +709,22 @@ export default function AdminPage() {
                                 <UserCheck className="mr-1 h-3.5 w-3.5" /> Reconsider & Approve
                               </Button>
                             )}
+
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              title="Generate password reset link"
+                              onClick={() => handleInitiatePasswordReset(acc.id, acc.owner_email)}
+                              disabled={resettingPasswordId === acc.id}
+                              className="h-7 text-xs text-sky-500 hover:bg-sky-500/10 border-sky-500/30"
+                            >
+                              {resettingPasswordId === acc.id ? (
+                                <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <KeyRound className="mr-1 h-3.5 w-3.5" />
+                              )}
+                              Reset Password
+                            </Button>
                           </div>
                         </td>
                       </tr>
@@ -888,14 +930,31 @@ export default function AdminPage() {
                       )}
                     </td>
                     <td className="p-3 text-right">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => handleToggleSuspend(t.id, Boolean(t.is_suspended))}
-                        className={`text-xs ${t.is_suspended ? 'text-emerald-500' : 'text-red-400'}`}
-                      >
-                        {t.is_suspended ? 'Unsuspend' : 'Suspend'}
-                      </Button>
+                      <div className="flex items-center justify-end gap-1.5">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          title="Generate password reset link"
+                          onClick={() => handleInitiatePasswordReset(t.id, t.owner_email)}
+                          disabled={resettingPasswordId === t.id}
+                          className="h-7 text-xs text-sky-500 hover:bg-sky-500/10 border-sky-500/30"
+                        >
+                          {resettingPasswordId === t.id ? (
+                            <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <KeyRound className="mr-1 h-3.5 w-3.5" />
+                          )}
+                          Reset Password
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => handleToggleSuspend(t.id, Boolean(t.is_suspended))}
+                          className={`h-7 text-xs ${t.is_suspended ? 'text-emerald-500' : 'text-red-400'}`}
+                        >
+                          {t.is_suspended ? 'Unsuspend' : 'Suspend'}
+                        </Button>
+                      </div>
                     </td>
                   </tr>
                 ))}

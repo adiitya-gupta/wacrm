@@ -126,15 +126,25 @@ export async function GET(request: Request) {
     const admin = supabaseAdmin()
     const now = new Date()
 
-    // Pull all currently-active runs along with their parent flow's
-    // fallback_policy. Joined in one query — the small set of active
-    // runs per tenant keeps this cheap.
-    const { data: runs, error } = await admin
+    const BATCH_SIZE = 50
+
+    // Pull currently-active runs ordered by oldest activity, bounded to BATCH_SIZE
+    // to prevent serverless timeout and provide fair sweep across tenants.
+    let query = admin
       .from('flow_runs')
       .select(
         'id, flow_id, user_id, contact_id, last_advanced_at, flows ( fallback_policy )',
       )
       .eq('status', 'active')
+
+    if (typeof query.order === 'function') {
+      query = query.order('last_advanced_at', { ascending: true })
+    }
+    if (typeof query.limit === 'function') {
+      query = query.limit(BATCH_SIZE)
+    }
+
+    const { data: runs, error } = await query
 
     if (error) {
       return cronErrorResponse(500, 'active_run_scan', error)

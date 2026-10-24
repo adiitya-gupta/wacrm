@@ -29,7 +29,7 @@ export async function POST(request: Request) {
     // the customer's message even though RLS blocked the local mirror.
     const { supabase, accountId, userId } = await requireRole('agent');
 
-    const limit = await checkRateLimit(`react:${userId}`, RATE_LIMITS.react);
+    const limit = await checkRateLimit(`react:${accountId}:${userId}`, RATE_LIMITS.react);
     if (!limit.success) {
       return rateLimitResponse(limit);
     }

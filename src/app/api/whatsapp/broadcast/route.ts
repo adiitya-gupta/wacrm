@@ -77,10 +77,10 @@ export async function POST(request: Request) {
     // to happen here.
     const { supabase, accountId, userId } = await requireRole('agent')
 
-    // Per-user broadcast budget. Note: this limits how often a user
+    // Per-user and per-account broadcast budget. Note: this limits how often a user
     // can *start* a campaign, not how many messages go out inside
     // one — the fan-out loop below runs without additional gating.
-    const limit = await checkRateLimit(`broadcast:${userId}`, RATE_LIMITS.broadcast)
+    const limit = await checkRateLimit(`broadcast:${accountId}:${userId}`, RATE_LIMITS.broadcast)
     if (!limit.success) {
       return rateLimitResponse(limit)
     }

@@ -77,7 +77,7 @@ export default function PricingPage() {
                 Sign In
               </Button>
             </Link>
-            <Link href="/signup">
+            <Link href="/login">
               <Button className="bg-primary text-primary-foreground shadow-sm hover:bg-primary/90">
                 Start Free Trial
               </Button>
@@ -153,7 +153,7 @@ export default function PricingPage() {
               </CardContent>
 
               <CardFooter className="p-6 pt-0">
-                <Link href={`/signup?plan=${plan.id}`} className="w-full">
+                <Link href={`/login?plan=${plan.id}`} className="w-full">
                   <Button
                     className={`w-full font-semibold shadow-sm ${
                       plan.popular
@@ -186,7 +186,7 @@ export default function PricingPage() {
                 Book Managed Discovery Call
               </Button>
             </Link>
-            <Link href="/signup">
+            <Link href="/login">
               <Button size="lg" variant="outline">
                 Explore Self-Service Platform
               </Button>

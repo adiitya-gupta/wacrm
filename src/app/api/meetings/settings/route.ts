@@ -1,6 +1,9 @@
 import { NextResponse } from 'next/server';
 import { requireRole, toErrorResponse } from '@/lib/auth/account';
-import { loadSchedulingSettings } from '@/lib/scheduling/availability';
+import {
+  loadSchedulingSettings,
+  SCHEDULING_SETTINGS_PUBLIC_COLUMNS,
+} from '@/lib/scheduling/availability';
 
 export async function GET() {
   try {
@@ -51,7 +54,7 @@ export async function PUT(request: Request) {
     const { data: updated, error } = await ctx.supabase
       .from('scheduling_settings')
       .upsert(payload, { onConflict: 'account_id' })
-      .select()
+      .select(SCHEDULING_SETTINGS_PUBLIC_COLUMNS)
       .single();
 
     if (error) {

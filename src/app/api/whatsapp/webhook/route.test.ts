@@ -1,6 +1,6 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createHmac } from 'node:crypto'
-import { GET } from './route'
+import { GET, __resetWebhookAdminClientForTests } from './route'
 import { encrypt } from '@/lib/whatsapp/encryption'
 
 let mockConfigs: { id: string; verify_token: string | null }[] = []
@@ -36,17 +36,21 @@ vi.mock('@supabase/supabase-js', () => ({
 }))
 
 describe('WhatsApp Webhook GET Verification', () => {
-  const originalEnv = process.env.WHATSAPP_VERIFY_TOKEN
+  const originalEnv = { ...process.env }
   const TEST_TOKEN = 'opsiys_webhook_verify_2026_A7x9K2'
 
   beforeEach(() => {
     mockConfigs = []
+    __resetWebhookAdminClientForTests()
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://test-project.supabase.co'
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'test_service_role_key'
     process.env.WHATSAPP_VERIFY_TOKEN = ''
     process.env.META_VERIFY_TOKEN = ''
   })
 
   afterAll(() => {
-    process.env.WHATSAPP_VERIFY_TOKEN = originalEnv
+    process.env = originalEnv
+    __resetWebhookAdminClientForTests()
   })
 
   it('verifies successfully with token from database whatsapp_config', async () => {
@@ -111,6 +115,27 @@ describe('WhatsApp Webhook GET Verification', () => {
     expect(data.error).toBe('Missing verification parameters')
   })
 
+  it('rejects when only hub.mode is provided with 400', async () => {
+    const req = new Request('https://example.com/api/whatsapp/webhook?hub.mode=subscribe')
+    const res = await GET(req)
+    expect(res.status).toBe(400)
+    expect((await res.json()).error).toBe('Missing verification parameters')
+  })
+
+  it('rejects when only hub.challenge is provided with 400', async () => {
+    const req = new Request('https://example.com/api/whatsapp/webhook?hub.challenge=12345')
+    const res = await GET(req)
+    expect(res.status).toBe(400)
+    expect((await res.json()).error).toBe('Missing verification parameters')
+  })
+
+  it('rejects when only hub.verify_token is provided with 400', async () => {
+    const req = new Request(`https://example.com/api/whatsapp/webhook?hub.verify_token=${TEST_TOKEN}`)
+    const res = await GET(req)
+    expect(res.status).toBe(400)
+    expect((await res.json()).error).toBe('Missing verification parameters')
+  })
+
   it('rejects invalid verification mode with 400', async () => {
     process.env.WHATSAPP_VERIFY_TOKEN = TEST_TOKEN
 
@@ -122,6 +147,20 @@ describe('WhatsApp Webhook GET Verification', () => {
     expect(res.status).toBe(400)
     const data = await res.json()
     expect(data.error).toBe('Invalid verification mode')
+  })
+
+  it('falls back to environment variable when database query fails', async () => {
+    process.env.WHATSAPP_VERIFY_TOKEN = TEST_TOKEN
+    mockConfigs = [] // simulate no rows or error in db
+
+    const req = new Request(
+      `https://example.com/api/whatsapp/webhook?hub.mode=subscribe&hub.challenge=challenge_fallback&hub.verify_token=${TEST_TOKEN}`
+    )
+    const res = await GET(req)
+
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toContain('text/plain')
+    expect(await res.text()).toBe('challenge_fallback')
   })
 })
 

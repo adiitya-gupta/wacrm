@@ -39,20 +39,25 @@ export async function POST(request: Request) {
       );
     }
 
-    // If signature header is provided, verify HMAC SHA-256
+    // Mandatory HMAC SHA-256 signature verification for server-to-server webhook ingestion
     const signature = request.headers.get('x-wacrm-signature');
-    if (signature) {
-      const isValid = verifyWebsiteWebhookSignature(
-        rawBody,
-        signature,
-        integration.webhook_secret
+    if (!signature) {
+      return NextResponse.json(
+        { error: "Missing required 'x-wacrm-signature' header" },
+        { status: 401 }
       );
-      if (!isValid) {
-        return NextResponse.json(
-          { error: 'Invalid webhook signature' },
-          { status: 401 }
-        );
-      }
+    }
+
+    const isValid = verifyWebsiteWebhookSignature(
+      rawBody,
+      signature,
+      integration.webhook_secret
+    );
+    if (!isValid) {
+      return NextResponse.json(
+        { error: 'Invalid webhook signature' },
+        { status: 401 }
+      );
     }
 
     const event_type = String(payload.event_type || payload.event || 'custom');

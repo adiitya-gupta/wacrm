@@ -152,7 +152,34 @@ export async function getCurrentAccount(): Promise<AccountContext> {
     console.error("[getCurrentAccount] profile fetch error:", error);
     throw new ForbiddenError(t("loadContext"));
   }
+  const email = user.email || "";
+  const isPlatformAdminUser = checkIsPlatformAdmin({
+    accountId: data?.account_id,
+    email,
+    role: data?.account_role,
+  });
+
   if (!data || !data.account_id || !data.account_role) {
+    if (isPlatformAdminUser) {
+      const opsiysAccountId =
+        process.env.OPSIYS_ACCOUNT_ID?.trim() || "7498de6d-f333-457d-8545-ef34fdd10c54";
+      return {
+        supabase,
+        userId: user.id,
+        accountId: opsiysAccountId,
+        role: "owner",
+        account: {
+          id: opsiysAccountId,
+          name: "OPSIYS Platform Admin",
+          approval_status: "approved",
+          is_suspended: false,
+          status_reason: null,
+        },
+        approvalStatus: "approved",
+        isPlatformAdmin: true,
+        userEmail: email,
+      };
+    }
     // Pre-migration profile, or a manual insert that skipped the
     // signup trigger. The user is authenticated but the app has
     // no way to scope their queries — treat as forbidden.
@@ -164,13 +191,6 @@ export async function getCurrentAccount(): Promise<AccountContext> {
     // hit this — surface it rather than silently widening.
     throw new ForbiddenError(`Unknown account role: ${data.account_role}`);
   }
-
-  const email = user.email || "";
-  const isPlatformAdminUser = checkIsPlatformAdmin({
-    accountId: data.account_id,
-    email,
-    role: data.account_role,
-  });
 
   // Load the account with a plain point lookup by id rather than an
   // embedded FK join (`account:accounts!inner(...)`).
@@ -209,6 +229,26 @@ export async function getCurrentAccount(): Promise<AccountContext> {
     throw new ForbiddenError(t("loadContext"));
   }
   if (!account) {
+    if (isPlatformAdminUser) {
+      const opsiysAccountId =
+        process.env.OPSIYS_ACCOUNT_ID?.trim() || "7498de6d-f333-457d-8545-ef34fdd10c54";
+      return {
+        supabase,
+        userId: user.id,
+        accountId: opsiysAccountId,
+        role: "owner",
+        account: {
+          id: opsiysAccountId,
+          name: "OPSIYS Platform Admin",
+          approval_status: "approved",
+          is_suspended: false,
+          status_reason: null,
+        },
+        approvalStatus: "approved",
+        isPlatformAdmin: true,
+        userEmail: email,
+      };
+    }
     // account_id points at no readable account row — orphaned profile
     // or an RLS gap. Same "can't scope this user" outcome as above.
     throw new ForbiddenError(t("notLinked"));

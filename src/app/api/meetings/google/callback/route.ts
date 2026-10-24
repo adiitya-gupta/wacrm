@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/ai/admin-client';
-import { exchangeGoogleCodeForTokens } from '@/lib/scheduling/google-calendar';
+import { exchangeGoogleCodeForTokens, encryptGoogleTokens } from '@/lib/scheduling/google-calendar';
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
@@ -36,6 +36,7 @@ export async function GET(request: Request) {
     }
 
     const admin = supabaseAdmin();
+    const encryptedTokens = encryptGoogleTokens(result.tokens);
 
     // Check if scheduling_settings already exists for this account
     const { data: existing } = await admin
@@ -50,7 +51,7 @@ export async function GET(request: Request) {
         .update({
           google_calendar_enabled: true,
           google_calendar_email: result.email || null,
-          google_calendar_tokens: result.tokens,
+          google_calendar_tokens: encryptedTokens,
           updated_at: new Date().toISOString(),
         })
         .eq('account_id', state.accountId);
@@ -64,7 +65,7 @@ export async function GET(request: Request) {
         account_id: state.accountId,
         google_calendar_enabled: true,
         google_calendar_email: result.email || null,
-        google_calendar_tokens: result.tokens,
+        google_calendar_tokens: encryptedTokens,
       });
 
       if (insertErr) {

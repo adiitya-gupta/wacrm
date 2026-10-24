@@ -15,7 +15,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { MessageSquare, CheckCircle, UsersRound } from "lucide-react";
+import { MessageSquare, CheckCircle, UsersRound, ShieldAlert } from "lucide-react";
 
 // `useSearchParams` opts the component out of static prerendering
 // unless wrapped in Suspense — same pattern as /login.
@@ -44,11 +44,15 @@ function SignupPageInner() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
-  const supabase = createClient();
 
   const handleSignup = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+
+    if (!inviteToken) {
+      setError("Registration is by invitation only. Please use your organization invitation link.");
+      return;
+    }
 
     if (password !== confirmPassword) {
       setError(t("passwordsMismatch"));
@@ -62,41 +66,62 @@ function SignupPageInner() {
 
     setLoading(true);
 
-    // Always name our own origin as the place the confirmation link
-    // returns to. Previously this was left unset unless an invite was
-    // involved, so Supabase fell back to its Site URL — which on a
-    // freshly-created or self-hosted project is `http://localhost:3000`
-    // (issue #595) — and even when the Site URL was right the link
-    // landed on `/` with an unexchanged `?code=`, so the user had to
-    // sign in again after verifying. /auth/callback exchanges the link
-    // for a session and forwards to `next` (issue #592). Supabase still
-    // has to allow this origin under Authentication → URL Configuration
-    // → Redirect URLs; see docs/auth-emails.md.
-    const next = inviteToken
-      ? `/join/${encodeURIComponent(inviteToken)}`
-      : "/dashboard";
-    const emailRedirectTo = `${window.location.origin}/auth/callback?next=${encodeURIComponent(next)}`;
+    try {
+      const supabase = createClient();
+      const next = `/join/${encodeURIComponent(inviteToken)}`;
+      const emailRedirectTo = `${window.location.origin}/auth/callback?next=${encodeURIComponent(next)}`;
 
-    const { error } = await supabase.auth.signUp({
-      email,
-      password,
-      options: {
-        data: {
-          full_name: fullName,
+      const { error: signUpError } = await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          data: {
+            full_name: fullName,
+          },
+          emailRedirectTo,
         },
-        emailRedirectTo,
-      },
-    });
+      });
 
-    if (error) {
-      setError(error.message);
+      if (signUpError) {
+        setError(signUpError.message);
+        setLoading(false);
+        return;
+      }
+
+      setSuccess(true);
       setLoading(false);
-      return;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to initialize registration client");
+      setLoading(false);
     }
-
-    setSuccess(true);
-    setLoading(false);
   };
+
+  if (!inviteToken) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-background px-4">
+        <Card className="w-full max-w-md border-border bg-card">
+          <CardHeader className="items-center text-center">
+            <div className="mb-2 flex h-12 w-12 items-center justify-center rounded-xl bg-amber-500/10">
+              <ShieldAlert className="h-6 w-6 text-amber-500" />
+            </div>
+            <CardTitle className="text-xl text-foreground">
+              Registration by Invitation Only
+            </CardTitle>
+            <CardDescription className="text-muted-foreground">
+              Wattomation is an invite-only platform. Public self-registration is disabled. If your organization was provisioned by an administrator, please use the invitation link sent to your email.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-3">
+            <Link href="/login">
+              <Button className="h-10 w-full bg-primary text-primary-foreground hover:bg-primary/90">
+                {t("backToSignIn")}
+              </Button>
+            </Link>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
 
   if (success) {
     return (

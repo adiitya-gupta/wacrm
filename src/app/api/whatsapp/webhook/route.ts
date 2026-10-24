@@ -1,5 +1,6 @@
 import { NextResponse, after } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
+import { normalizeSupabaseUrl } from '@/lib/supabase/normalize-url'
 import { decrypt, encrypt, isLegacyFormat } from '@/lib/whatsapp/encryption'
 import { getMediaUrl } from '@/lib/whatsapp/meta-api'
 import { mirrorInboundMedia } from '@/lib/whatsapp/mirror-inbound-media'
@@ -38,9 +39,24 @@ export const maxDuration = 60
 let _adminClient: any = null
 function supabaseAdmin() {
   if (!_adminClient) {
+    const rawUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL
+    const rawKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY
+    const url = normalizeSupabaseUrl(rawUrl)
+    const key = rawKey?.trim().replace(/^["']|["']$/g, '').trim()
+
+    if (!url || !key) {
+      const missing = [
+        !url ? 'NEXT_PUBLIC_SUPABASE_URL/SUPABASE_URL' : null,
+        !key ? 'SUPABASE_SERVICE_ROLE_KEY/SUPABASE_SERVICE_KEY' : null,
+      ]
+        .filter(Boolean)
+        .join(', ')
+      throw new Error(`WhatsApp webhook admin client misconfigured: missing ${missing}`)
+    }
+
     _adminClient = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_ROLE_KEY!,
+      url,
+      key,
       {
         auth: {
           persistSession: false,
@@ -50,6 +66,10 @@ function supabaseAdmin() {
     )
   }
   return _adminClient
+}
+
+export function __resetWebhookAdminClientForTests() {
+  _adminClient = null
 }
 
 interface WhatsAppMessage {
@@ -167,14 +187,31 @@ export async function GET(request: Request) {
     }
 
     // 1. Fetch saved whatsapp configs from Supabase (WACRM settings source of truth)
-    const { data: configs, error: configError } = await supabaseAdmin()
-      .from('whatsapp_config')
-      .select('id, verify_token')
+    let configs: { id: string; verify_token: string | null }[] | null = null
+    try {
+      const { data, error: configError } = await supabaseAdmin()
+        .from('whatsapp_config')
+        .select('id, verify_token')
+
+      if (configError) {
+        console.warn(
+          '[webhook] Failed to fetch whatsapp_config for verification:',
+          configError.message || configError
+        )
+      } else {
+        configs = data
+      }
+    } catch (clientErr) {
+      console.warn(
+        '[webhook] supabaseAdmin client initialization failed during verification:',
+        clientErr instanceof Error ? clientErr.message : clientErr
+      )
+    }
 
     let matchedConfig: { id: string; verify_token: string | null } | null = null
     let tokenMatched = false
 
-    if (!configError && configs) {
+    if (configs) {
       for (const config of configs) {
         if (!config.verify_token) continue
         try {
@@ -183,8 +220,11 @@ export async function GET(request: Request) {
             tokenMatched = true
             break
           }
-        } catch {
-          // Malformed / wrong-key token row — skip it and keep checking.
+        } catch (decryptErr) {
+          console.warn(
+            `[webhook] Failed to decrypt verify_token for config ${config.id}:`,
+            decryptErr instanceof Error ? decryptErr.message : decryptErr
+          )
         }
       }
     }
@@ -231,6 +271,7 @@ export async function GET(request: Request) {
       })
     }
 
+    console.warn('[webhook] Verification token mismatch: incoming token did not match any stored or environment token.')
     return NextResponse.json(
       { error: 'Verification token mismatch' },
       { status: 403 }
@@ -322,56 +363,66 @@ async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
 
       const value = change.value
 
-      // Handle status updates
+      const phoneNumberId = value.metadata?.phone_number_id
+      interface WhatsAppConfigRow {
+        id: string
+        account_id: string
+        user_id: string
+        phone_number_id: string
+        access_token: string
+        mirror_inbound_media?: boolean
+      }
+      let resolvedAccountId: string | null = null
+      let resolvedConfig: WhatsAppConfigRow | null = null
+
+      if (phoneNumberId) {
+        const { data: configRows, error: configError } = await supabaseAdmin()
+          .from('whatsapp_config')
+          .select('*')
+          .eq('phone_number_id', phoneNumberId)
+
+        if (configError) {
+          console.error(
+            'Error fetching whatsapp_config for phone_number_id:',
+            phoneNumberId,
+            configError
+          )
+        } else if (!configRows || configRows.length === 0) {
+          console.error('No config found for phone_number_id:', phoneNumberId)
+        } else if (configRows.length > 1) {
+          console.error(
+            `Multiple configs (${configRows.length}) found for phone_number_id:`,
+            phoneNumberId,
+            '— event dropped to preserve cross-tenant isolation.',
+            'Account owners:',
+            configRows.map((r: { account_id: string; user_id: string }) => `${r.account_id} (admin ${r.user_id})`)
+          )
+        } else {
+          resolvedConfig = configRows[0] as WhatsAppConfigRow
+          resolvedAccountId = configRows[0].account_id
+        }
+      }
+
+      // Handle status updates strictly isolated to the owning account
       if (value.statuses) {
-        for (const status of value.statuses) {
-          await handleStatusUpdate(status)
+        if (!resolvedAccountId) {
+          console.warn(
+            '[webhook] Dropping status update because phone_number_id could not be resolved to a single tenant account:',
+            phoneNumberId
+          )
+        } else {
+          for (const status of value.statuses) {
+            await handleStatusUpdate(status, resolvedAccountId)
+          }
         }
       }
 
       // Handle incoming messages
       if (!value.messages || !value.contacts) continue
+      if (!resolvedConfig || !resolvedAccountId) continue
 
-      const phoneNumberId = value.metadata.phone_number_id
-
-      // Find user's config by phone_number_id. `.single()` returns
-      // PGRST116 for both 0 rows AND ≥2 rows — distinguish them so
-      // operators see the real cause in logs. ≥2 rows shouldn't happen
-      // post-migration 013 (UNIQUE constraint), but a row created
-      // before the constraint, or a race, would still surface here.
-      const { data: configRows, error: configError } = await supabaseAdmin()
-        .from('whatsapp_config')
-        .select('*')
-        .eq('phone_number_id', phoneNumberId)
-
-      if (configError) {
-        console.error(
-          'Error fetching whatsapp_config for phone_number_id:',
-          phoneNumberId,
-          configError
-        )
-        continue
-      }
-
-      if (!configRows || configRows.length === 0) {
-        console.error('No config found for phone_number_id:', phoneNumberId)
-        continue
-      }
-
-      if (configRows.length > 1) {
-        console.error(
-          `Multiple configs (${configRows.length}) found for phone_number_id:`,
-          phoneNumberId,
-          '— inbound message dropped. Resolve duplicates so each number maps to a single account.',
-          'Account owners:',
-          configRows.map((r: { account_id: string; user_id: string }) => `${r.account_id} (admin ${r.user_id})`)
-        )
-        continue
-      }
-
-      const config = configRows[0]
-
-      const decryptedAccessToken = decrypt(config.access_token)
+      const config = resolvedConfig
+      const decryptedAccessToken = decrypt(config.access_token as string)
 
       for (let i = 0; i < value.messages.length; i++) {
         const message = value.messages[i]
@@ -440,13 +491,16 @@ function isValidStatusTransition(current: string, incoming: string): boolean {
   return ii > ci
 }
 
-async function handleStatusUpdate(status: {
-  id: string
-  status: string
-  timestamp: string
-  recipient_id: string
-  errors?: MetaStatusError[]
-}) {
+async function handleStatusUpdate(
+  status: {
+    id: string
+    status: string
+    timestamp: string
+    recipient_id: string
+    errors?: MetaStatusError[]
+  },
+  accountId: string
+) {
   // Meta's reason for a failed send (#535). Only read on `failed`; a
   // later non-failed status for the same wamid leaves the error
   // columns alone rather than clearing them, so the reason survives.
@@ -466,11 +520,7 @@ async function handleStatusUpdate(status: {
     )
   }
 
-  // 1) Mirror onto messages (legacy behavior) — Meta's status values
-  //    already match the CHECK constraint on messages.status. No
-  //    `.select()`: message_id is NOT unique (migration 009 — Meta ids
-  //    repeat across numbers), so this updates 0..N rows and must not
-  //    assume a single row.
+  // 1) Mirror onto messages (tenant-isolated)
   const messageUpdate: Record<string, unknown> = { status: status.status }
   if (failure) {
     messageUpdate.error_code = failure.code
@@ -481,25 +531,20 @@ async function handleStatusUpdate(status: {
     .from('messages')
     .update(messageUpdate)
     .eq('message_id', status.id)
+    .eq('account_id', accountId)
 
   if (msgErr) {
     console.error('Error updating message status:', msgErr)
   }
 
-  // Webhook fan-out for this status change happens at the END of this
-  // handler (after the broadcast mirror below), so a slow subscriber
-  // endpoint can't delay the broadcast_recipients update.
-
-  // 2) Mirror onto broadcast_recipients via whatsapp_message_id
-  //    (added in migration 003). The aggregate trigger on
-  //    broadcast_recipients re-derives the parent broadcast's
-  //    sent/delivered/read/failed counts automatically.
+  // 2) Mirror onto broadcast_recipients via whatsapp_message_id (tenant-isolated)
   const tsIso = new Date(parseInt(status.timestamp) * 1000).toISOString()
 
   const { data: recipient, error: recFetchErr } = await supabaseAdmin()
     .from('broadcast_recipients')
     .select('id, status')
     .eq('whatsapp_message_id', status.id)
+    .eq('account_id', accountId)
     .maybeSingle()
 
   if (recFetchErr) {
@@ -514,9 +559,6 @@ async function handleStatusUpdate(status: {
     if (status.status === 'sent' && !('sent_at' in update)) update.sent_at = tsIso
     if (status.status === 'delivered') update.delivered_at = tsIso
     if (status.status === 'read') update.read_at = tsIso
-    // broadcast_recipients already has a free-text error_message column
-    // (migration 001), so the reason is folded into it rather than
-    // adding three more columns there.
     if (failure) {
       update.error_message =
         `[${failure.code}] ${failure.title}` +
@@ -527,38 +569,33 @@ async function handleStatusUpdate(status: {
       .from('broadcast_recipients')
       .update(update)
       .eq('id', recipient.id)
+      .eq('account_id', accountId)
 
     if (recUpdateErr) {
       console.error('Error updating broadcast recipient status:', recUpdateErr)
     }
   }
 
-  // 3) Webhook fan-out for messages we store (inbox / API sends).
-  //    Runs last so a slow subscriber can't delay the mirrors above.
-  //    Bounded to one row (message_id isn't unique) purely to resolve
-  //    the owning account for delivery.
+  // 3) Webhook fan-out for messages we store (inbox / API sends), scoped to accountId.
   const { data: msgRow } = await supabaseAdmin()
     .from('messages')
-    .select('conversation_id, conversations(account_id)')
+    .select('conversation_id')
     .eq('message_id', status.id)
+    .eq('account_id', accountId)
     .limit(1)
     .maybeSingle()
 
   if (msgRow) {
-    const conv = msgRow.conversations as { account_id: string } | null
-    const accountId = conv?.account_id
-    if (accountId) {
-      await dispatchWebhookEvent(
-        supabaseAdmin(),
-        accountId,
-        'message.status_updated',
-        {
-          whatsapp_message_id: status.id,
-          conversation_id: msgRow.conversation_id,
-          status: status.status,
-        }
-      )
-    }
+    await dispatchWebhookEvent(
+      supabaseAdmin(),
+      accountId,
+      'message.status_updated',
+      {
+        whatsapp_message_id: status.id,
+        conversation_id: msgRow.conversation_id,
+        status: status.status,
+      }
+    )
   }
 }
 
@@ -819,23 +856,17 @@ async function processMessage(
     .from('messages')
     .upsert(
       {
+        account_id: accountId,
         conversation_id: conversation.id,
         sender_type: 'customer',
         content_type: contentType,
         content_text: contentText,
         media_url: mediaUrl,
-        // Meta's MIME type for the attachment (migration 039). Was
-        // discarded before, which forced the download path to guess an
-        // extension from the fetched blob — impossible to do until the
-        // bytes had already been fetched successfully.
         media_type: mediaType,
         message_id: message.id,
         status: 'delivered',
         created_at: new Date(parseInt(message.timestamp) * 1000).toISOString(),
         reply_to_message_id: replyToInternalId,
-        // Only populated for content_type='interactive'. Migration 010 added
-        // the column; null for every other content_type so existing inserts
-        // behave identically.
         interactive_reply_id: interactiveReplyId,
       },
       { onConflict: 'conversation_id,message_id', ignoreDuplicates: true }

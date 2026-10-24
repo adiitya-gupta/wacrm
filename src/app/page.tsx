@@ -77,7 +77,7 @@ export default function HomePage() {
                 Sign In
               </Button>
             </Link>
-            <Link href="/signup">
+            <Link href="/login">
               <Button className="bg-primary text-primary-foreground hover:bg-primary/90 font-medium shadow-sm shadow-primary/25">
                 Get Started <ArrowRight className="ml-1.5 h-4 w-4" />
               </Button>
@@ -136,7 +136,7 @@ export default function HomePage() {
                   Sign In
                 </Button>
               </Link>
-              <Link href="/signup" onClick={() => setMobileMenuOpen(false)}>
+              <Link href="/login" onClick={() => setMobileMenuOpen(false)}>
                 <Button className="w-full bg-primary text-primary-foreground text-sm">
                   Get Started
                 </Button>
@@ -168,7 +168,7 @@ export default function HomePage() {
 
             {/* CTA Buttons */}
             <div className="mt-8 flex flex-col sm:flex-row items-center justify-center gap-3">
-              <Link href="/signup" className="w-full sm:w-auto">
+              <Link href="/login" className="w-full sm:w-auto">
                 <Button size="lg" className="w-full sm:w-auto h-12 px-7 bg-primary text-primary-foreground hover:bg-primary/90 font-semibold shadow-md shadow-primary/25 text-base">
                   Get Started <ArrowRight className="ml-2 h-4 w-4" />
                 </Button>
@@ -686,7 +686,7 @@ export default function HomePage() {
               Join businesses automating sales, support, and marketing on WhatsApp. Register today to request your verified workspace.
             </p>
             <div className="mt-8 flex justify-center">
-              <Link href="/signup">
+              <Link href="/login">
                 <Button size="lg" className="h-12 px-8 bg-primary text-primary-foreground hover:bg-primary/90 font-semibold shadow-md shadow-primary/25 text-base">
                   Get Started <ArrowRight className="ml-2 h-4 w-4" />
                 </Button>
@@ -715,7 +715,7 @@ export default function HomePage() {
             <a href="#use-cases" className="hover:text-foreground transition-colors">Use Cases</a>
             <a href="#security" className="hover:text-foreground transition-colors">Architecture</a>
             <Link href="/login" className="hover:text-foreground transition-colors">Sign In</Link>
-            <Link href="/signup" className="hover:text-foreground transition-colors">Get Started</Link>
+            <Link href="/login" className="hover:text-foreground transition-colors">Get Started</Link>
           </div>
 
           <div className="text-xs text-muted-foreground">

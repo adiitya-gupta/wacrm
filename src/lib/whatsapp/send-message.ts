@@ -478,6 +478,7 @@ export async function sendMessageToConversation(
   const { data: messageRecord, error: msgError } = await db
     .from('messages')
     .insert({
+      account_id: accountId,
       conversation_id: conversationId,
       sender_type: 'agent',
       content_type: messageType,

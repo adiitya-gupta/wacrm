@@ -120,7 +120,7 @@ export function WhatsAppConfig() {
   // in the row). When false, the saved config is metadata-only and
   // Meta will silently drop every inbound event — that's the
   // multi-number bug that prompted this work.
-  const isRegistered = Boolean(config?.registered_at);
+  const isRegistered = Boolean(config?.registered_at) && !config?.last_registration_error;
   const lastRegistrationError = config?.last_registration_error ?? null;
 
   const [verifyingRegistration, setVerifyingRegistration] = useState(false);
@@ -296,6 +296,7 @@ export function WhatsAppConfig() {
                 code: auth.code,
                 waba_id: auth.wabaId,
                 phone_number_id: auth.phoneNumberId,
+                business_id: auth.businessId,
               }),
             });
 
@@ -304,11 +305,25 @@ export function WhatsAppConfig() {
               throw new Error(data.error || 'Failed to exchange token with Meta.');
             }
 
-            toast.success(
-              t('embeddedSignupSuccess', {
-                defaultMessage: 'WhatsApp account connected successfully.',
-              })
-            );
+            if (data.registered === false || data.registration_error) {
+              toast.warning(
+                data.registration_error
+                  ? `${t('embeddedSignupRegistrationIncomplete', {
+                      defaultMessage: 'WhatsApp credentials connected, but phone registration is incomplete',
+                    })}: ${data.registration_error}`
+                  : t('embeddedSignupRegistrationPending', {
+                      defaultMessage:
+                        'WhatsApp credentials connected, but phone registration is pending. Please verify registration.',
+                    }),
+                { duration: 8000 }
+              );
+            } else {
+              toast.success(
+                t('embeddedSignupSuccess', {
+                  defaultMessage: 'WhatsApp account connected successfully.',
+                })
+              );
+            }
 
             if (accountId) {
               await fetchConfig(accountId);
@@ -324,18 +339,45 @@ export function WhatsAppConfig() {
             setEmbeddedConnecting(false);
           }
         },
-        onCancel: () => {
+        onCancel: (details) => {
           setEmbeddedConnecting(false);
-          toast.info(
-            t('embeddedSignupCancelled', {
-              defaultMessage: 'WhatsApp Embedded Signup was cancelled.',
-            })
-          );
+          if (
+            details?.currentStep === 'WABA_PHONE_PROFILE_PICKER' ||
+            details?.currentStep === 'BUSINESS_ACCOUNT_SELECTION'
+          ) {
+            toast.error(
+              t('embeddedSignupAccountTypeCancelled', {
+                defaultMessage:
+                  'WhatsApp setup was cancelled or closed during account selection. If Meta displayed "Unsupported WhatsApp business account type", please ensure you choose a valid Meta Business Portfolio and select or create a Cloud API WhatsApp account (not a personal or unsupported account type).',
+              }),
+              { duration: 8000 }
+            );
+          } else {
+            toast.info(
+              t('embeddedSignupCancelled', {
+                defaultMessage: 'WhatsApp Embedded Signup was cancelled.',
+              })
+            );
+          }
         },
-        onError: (err) => {
+        onError: (err, details) => {
           setEmbeddedConnecting(false);
           console.error('Embedded signup error:', err);
-          toast.error(err.message || 'WhatsApp Embedded Signup encountered an error');
+          const msg = err.message || '';
+          if (
+            msg.toLowerCase().includes('account type') ||
+            details?.currentStep === 'WABA_PHONE_PROFILE_PICKER'
+          ) {
+            toast.error(
+              t('embeddedSignupAccountTypeError', {
+                defaultMessage:
+                  'Meta reported an unsupported account type. Please ensure you select a valid Meta Business Portfolio and create or choose a Cloud API WhatsApp account.',
+              }),
+              { duration: 8000 }
+            );
+          } else {
+            toast.error(msg || 'WhatsApp Embedded Signup encountered an error');
+          }
         },
       });
     } catch (err) {

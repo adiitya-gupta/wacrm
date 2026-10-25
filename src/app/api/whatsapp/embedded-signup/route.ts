@@ -5,15 +5,19 @@ import {
   exchangeOAuthCode,
   exchangeForLongLivedToken,
   debugToken,
+  extractTargetIdsFromDebugToken,
+  discoverWabaAccounts,
   listWabaPhoneNumbers,
   subscribeWabaToApp,
   verifyPhoneNumber,
+  registerPhoneNumber,
 } from '@/lib/whatsapp/meta-api';
 import { isNumericMetaId, phoneNumberBelongsToWaba } from '@/lib/whatsapp/waba-pairing';
 import { encrypt, validateEncryptionKey } from '@/lib/whatsapp/encryption';
 import { resolveVerifyTokenForSave } from '@/lib/whatsapp/verify-token';
 import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from '@/lib/rate-limit';
 import { getT } from '@/lib/i18n/translate';
+import { explainMetaError } from '@/lib/whatsapp/meta-error-explain';
 
 const t = getT('Api');
 
@@ -69,6 +73,7 @@ export async function POST(request: Request) {
     const code = body?.code;
     let wabaId = body?.waba_id?.toString().trim();
     let phoneNumberId = body?.phone_number_id?.toString().trim();
+    const businessId = body?.business_id?.toString().trim();
 
     if (!code || typeof code !== 'string' || !code.trim()) {
       return NextResponse.json(
@@ -147,19 +152,82 @@ export async function POST(request: Request) {
     }
 
     // 4. Resolve WABA ID if not provided in the frontend payload
-    if (!wabaId) {
-      // Inspect granular_scopes from debug_token
-      const wabaScope = tokenData.granularScopes?.find(
-        (gs) => gs.scope === 'whatsapp_business_management'
-      );
-      if (wabaScope?.targetIds && wabaScope.targetIds.length > 0) {
-        wabaId = wabaScope.targetIds[0];
+    if (!wabaId || !isNumericMetaId(wabaId)) {
+      // 4a. Inspect granular_scopes from debug_token across all relevant scopes
+      const targetIds = extractTargetIdsFromDebugToken(tokenData);
+      if (targetIds.length > 0) {
+        wabaId = targetIds[0];
+      }
+    }
+
+    // 4b. Discover WABA via Graph API using authenticated access token if still unassigned
+    let discoveredWabas: Array<{ id: string; name?: string }> = [];
+    if (!wabaId || !isNumericMetaId(wabaId)) {
+      try {
+        discoveredWabas = await discoverWabaAccounts({
+          accessToken,
+          businessId: businessId && isNumericMetaId(businessId) ? businessId : undefined,
+          userId: tokenData.userId && isNumericMetaId(tokenData.userId) ? tokenData.userId : undefined,
+        });
+
+        if (discoveredWabas.length > 0) {
+          // If client provided a phoneNumberId, find the WABA that owns it
+          if (phoneNumberId && isNumericMetaId(phoneNumberId)) {
+            for (const acct of discoveredWabas) {
+              try {
+                const numbers = await listWabaPhoneNumbers({
+                  wabaId: acct.id,
+                  accessToken,
+                });
+                if (phoneNumberBelongsToWaba(numbers, phoneNumberId)) {
+                  wabaId = acct.id;
+                  break;
+                }
+              } catch {
+                // Continue checking other accounts
+              }
+            }
+          }
+
+          // If no specific match or no phoneNumberId, pick the first discovered WABA that has phone numbers
+          if (!wabaId) {
+            for (const acct of discoveredWabas) {
+              try {
+                const numbers = await listWabaPhoneNumbers({
+                  wabaId: acct.id,
+                  accessToken,
+                });
+                if (numbers.length > 0) {
+                  wabaId = acct.id;
+                  if (!phoneNumberId) {
+                    phoneNumberId = numbers[0].id;
+                  }
+                  break;
+                }
+              } catch {
+                // Continue
+              }
+            }
+          }
+
+          // Fallback to first discovered account
+          if (!wabaId && discoveredWabas[0]?.id) {
+            wabaId = discoveredWabas[0].id;
+          }
+        }
+      } catch (discErr) {
+        console.warn('[embedded-signup] discoverWabaAccounts notice:', discErr instanceof Error ? discErr.message : discErr);
       }
     }
 
     if (!wabaId || !isNumericMetaId(wabaId)) {
       return NextResponse.json(
-        { error: 'Could not determine WhatsApp Business Account ID from Meta Embedded Signup.' },
+        {
+          error:
+            'Could not determine WhatsApp Business Account ID from Meta Embedded Signup. ' +
+            'This usually occurs if the Meta popup was closed before completing setup or if an unsupported account type was selected. ' +
+            'Please click "Connect with Meta" again, ensure you select a valid Meta Business Portfolio, and create or choose a WhatsApp Business Account.',
+        },
         { status: 400 }
       );
     }
@@ -174,14 +242,40 @@ export async function POST(request: Request) {
     } catch (err) {
       console.error('[embedded-signup] listWabaPhoneNumbers failed:', err);
       return NextResponse.json(
-        { error: 'Could not list phone numbers for the connected WhatsApp Business Account.' },
+        { error: `Could not list phone numbers for WhatsApp Business Account ${wabaId}. Please verify your Meta permissions.` },
         { status: 400 }
       );
     }
 
+    // If wabaNumbers is empty, check other discovered WABAs if any exist
+    if ((!wabaNumbers || wabaNumbers.length === 0) && discoveredWabas.length > 1) {
+      for (const altAcct of discoveredWabas) {
+        if (altAcct.id !== wabaId) {
+          try {
+            const altNumbers = await listWabaPhoneNumbers({
+              wabaId: altAcct.id,
+              accessToken,
+            });
+            if (altNumbers.length > 0) {
+              wabaId = altAcct.id;
+              wabaNumbers = altNumbers;
+              break;
+            }
+          } catch {
+            // Continue
+          }
+        }
+      }
+    }
+
     if (!wabaNumbers || wabaNumbers.length === 0) {
       return NextResponse.json(
-        { error: 'No phone numbers found under this WhatsApp Business Account. Please add a number in Meta Business Manager.' },
+        {
+          error:
+            'No phone numbers found under the selected WhatsApp Business Account. ' +
+            'If Meta displayed an "Unsupported WhatsApp business account type" notice, please ensure your number is registered as a Cloud API number, ' +
+            'or add and verify a valid phone number during the Meta Embedded Signup flow.',
+        },
         { status: 400 }
       );
     }
@@ -221,6 +315,16 @@ export async function POST(request: Request) {
       );
     }
 
+    // Query existing config for this workspace to check previous registration and verify token
+    const { data: existing } = await supabase
+      .from('whatsapp_config')
+      .select('id, verify_token, phone_number_id, registered_at')
+      .eq('account_id', accountId)
+      .maybeSingle();
+
+    const isSameNumber = existing?.phone_number_id === phoneNumberId;
+    const existingRegisteredAt = isSameNumber && existing?.registered_at ? existing.registered_at : null;
+
     // 7. Verify Phone Number details with Meta
     let phoneInfo;
     try {
@@ -234,6 +338,41 @@ export async function POST(request: Request) {
         { error: 'Could not verify the selected phone number with Meta Cloud API.' },
         { status: 400 }
       );
+    }
+
+    const now = new Date().toISOString();
+    let registeredAt: string | null = null;
+    let registrationError: string | null = null;
+    let isRegistrationConfirmed = false;
+
+    // Determine registration state with Meta Cloud API
+    if (phoneInfo?.status === 'CONNECTED') {
+      // Meta authoritatively confirms the phone number is active and connected on the Cloud API
+      registeredAt = existingRegisteredAt ?? now;
+      registrationError = null;
+      isRegistrationConfirmed = true;
+    } else {
+      // If phone status is not yet CONNECTED, attempt PIN-less register
+      try {
+        await registerPhoneNumber({
+          phoneNumberId,
+          accessToken,
+        });
+        registeredAt = now;
+        registrationError = null;
+        isRegistrationConfirmed = true;
+      } catch (regErr) {
+        const metaCtx = { phoneNumberId, wabaId };
+        const explained = explainMetaError(regErr, 'register', metaCtx);
+        registrationError =
+          explained.summary ||
+          'Phone number registration with Meta Cloud API is incomplete. Two-step verification PIN or manual verification may be required.';
+        // If this same number had a valid registration timestamp previously, preserve it on retry rather than overwriting with null,
+        // but do not set a new timestamp and do not report registration as confirmed.
+        registeredAt = existingRegisteredAt ?? null;
+        isRegistrationConfirmed = false;
+        console.warn('[embedded-signup] registerPhoneNumber failed:', explained.metaMessage);
+      }
     }
 
     // 8. Subscribe WABA to this Meta App for webhook delivery
@@ -251,19 +390,12 @@ export async function POST(request: Request) {
     }
 
     // 9. Encrypt token and upsert into whatsapp_config
-    const { data: existing } = await supabase
-      .from('whatsapp_config')
-      .select('id, verify_token')
-      .eq('account_id', accountId)
-      .maybeSingle();
-
     const encryptedAccessToken = encrypt(accessToken);
     const encryptedVerifyToken = resolveVerifyTokenForSave(
       null,
       existing?.verify_token ?? null
     );
 
-    const now = new Date().toISOString();
     const configRow = {
       account_id: accountId,
       user_id: userId,
@@ -273,9 +405,9 @@ export async function POST(request: Request) {
       verify_token: encryptedVerifyToken,
       status: 'connected',
       connected_at: now,
-      registered_at: now,
+      registered_at: registeredAt,
       subscribed_apps_at: now,
-      last_registration_error: null,
+      last_registration_error: registrationError,
       updated_at: now,
     };
 
@@ -312,6 +444,8 @@ export async function POST(request: Request) {
       phone_info: phoneInfo,
       phone_number_id: phoneNumberId,
       waba_id: wabaId,
+      registered: isRegistrationConfirmed,
+      registration_error: registrationError,
     });
   } catch (err) {
     return toErrorResponse(err);

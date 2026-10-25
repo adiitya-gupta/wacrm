@@ -482,6 +482,179 @@ export async function debugToken(
   }
 }
 
+export interface DiscoveredWaba {
+  id: string
+  name?: string
+  currency?: string
+  timezone_id?: string
+}
+
+export interface DiscoverWabaAccountsArgs {
+  accessToken: string
+  businessId?: string
+  userId?: string
+}
+
+/**
+ * Extract all unique numeric WABA IDs from granular_scopes in debug_token.
+ * Prioritizes whatsapp_business_management and whatsapp_business_messaging scopes.
+ */
+export function extractTargetIdsFromDebugToken(tokenData: MetaDebugTokenData): string[] {
+  const ids: string[] = []
+  if (!tokenData.granularScopes || !Array.isArray(tokenData.granularScopes)) return ids
+
+  // Prioritize whatsapp_business_management first, then whatsapp_business_messaging, then others
+  const sortedScopes = [...tokenData.granularScopes].sort((a, b) => {
+    if (a.scope === 'whatsapp_business_management') return -1
+    if (b.scope === 'whatsapp_business_management') return 1
+    if (a.scope === 'whatsapp_business_messaging') return -1
+    if (b.scope === 'whatsapp_business_messaging') return 1
+    return 0
+  })
+
+  for (const gs of sortedScopes) {
+    if (Array.isArray(gs.targetIds)) {
+      for (const id of gs.targetIds) {
+        const clean = String(id).trim()
+        if (/^\d+$/.test(clean) && !ids.includes(clean)) {
+          ids.push(clean)
+        }
+      }
+    }
+  }
+
+  return ids
+}
+
+/**
+ * Discover accessible WhatsApp Business Accounts via Meta Graph API using the
+ * authenticated access token. Queries client/owned edges on business portfolios
+ * and user nodes.
+ */
+export async function discoverWabaAccounts(
+  args: DiscoverWabaAccountsArgs
+): Promise<DiscoveredWaba[]> {
+  const { accessToken, businessId, userId } = args
+  const accounts: DiscoveredWaba[] = []
+  const seenIds = new Set<string>()
+
+  const addAccount = (acct: { id?: string; name?: string; currency?: string; timezone_id?: string }) => {
+    if (acct?.id && /^\d+$/.test(acct.id) && !seenIds.has(acct.id)) {
+      seenIds.add(acct.id)
+      accounts.push({
+        id: acct.id,
+        name: acct.name,
+        currency: acct.currency,
+        timezone_id: acct.timezone_id,
+      })
+    }
+  }
+
+  const fetchAccountsFromUrl = async (url: string) => {
+    try {
+      const res = await fetch(url, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      })
+      if (!res.ok) return
+      const json = (await res.json()) as { data?: Array<{ id?: string; name?: string; currency?: string; timezone_id?: string }> }
+      if (Array.isArray(json?.data)) {
+        for (const item of json.data) {
+          addAccount(item)
+        }
+      }
+    } catch {
+      // Continue next attempt
+    }
+  }
+
+  // 1. If businessId was provided, query its WABA edges
+  if (businessId && /^\d+$/.test(businessId)) {
+    await fetchAccountsFromUrl(
+      `${META_API_BASE}/${businessId}/client_whatsapp_business_accounts?fields=id,name,currency,timezone_id`
+    )
+    await fetchAccountsFromUrl(
+      `${META_API_BASE}/${businessId}/owned_whatsapp_business_accounts?fields=id,name,currency,timezone_id`
+    )
+    await fetchAccountsFromUrl(
+      `${META_API_BASE}/${businessId}/whatsapp_business_accounts?fields=id,name,currency,timezone_id`
+    )
+  }
+
+  // 2. If userId was provided, query assigned WABA edges
+  if (userId && /^\d+$/.test(userId)) {
+    await fetchAccountsFromUrl(
+      `${META_API_BASE}/${userId}/assigned_whatsapp_business_accounts?fields=id,name,currency,timezone_id`
+    )
+  }
+  await fetchAccountsFromUrl(
+    `${META_API_BASE}/me/assigned_whatsapp_business_accounts?fields=id,name,currency,timezone_id`
+  )
+
+  // 2. Discover business portfolios from /me/businesses and query their WABA edges
+  try {
+    const bizRes = await fetch(`${META_API_BASE}/me/businesses?fields=id,name`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    })
+    if (bizRes.ok) {
+      const bizJson = (await bizRes.json()) as { data?: Array<{ id?: string; name?: string }> }
+      if (Array.isArray(bizJson?.data)) {
+        for (const biz of bizJson.data) {
+          if (biz?.id && /^\d+$/.test(biz.id)) {
+            await fetchAccountsFromUrl(
+              `${META_API_BASE}/${biz.id}/client_whatsapp_business_accounts?fields=id,name,currency,timezone_id`
+            )
+            await fetchAccountsFromUrl(
+              `${META_API_BASE}/${biz.id}/owned_whatsapp_business_accounts?fields=id,name,currency,timezone_id`
+            )
+            await fetchAccountsFromUrl(
+              `${META_API_BASE}/${biz.id}/whatsapp_business_accounts?fields=id,name,currency,timezone_id`
+            )
+          }
+        }
+      }
+    }
+  } catch {
+    // Continue
+  }
+
+  // 3. Query /me directly with businesses edge field expansion
+  try {
+    const meRes = await fetch(
+      `${META_API_BASE}/me?fields=businesses{id,name,owned_whatsapp_business_accounts{id,name},client_whatsapp_business_accounts{id,name}}`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    )
+    if (meRes.ok) {
+      const meJson = (await meRes.json()) as {
+        businesses?: {
+          data?: Array<{
+            owned_whatsapp_business_accounts?: { data?: Array<{ id?: string; name?: string }> }
+            client_whatsapp_business_accounts?: { data?: Array<{ id?: string; name?: string }> }
+          }>
+        }
+      }
+      const businesses = meJson?.businesses?.data
+      if (Array.isArray(businesses)) {
+        for (const b of businesses) {
+          if (Array.isArray(b?.owned_whatsapp_business_accounts?.data)) {
+            for (const item of b.owned_whatsapp_business_accounts.data) {
+              addAccount(item)
+            }
+          }
+          if (Array.isArray(b?.client_whatsapp_business_accounts?.data)) {
+            for (const item of b.client_whatsapp_business_accounts.data) {
+              addAccount(item)
+            }
+          }
+        }
+      }
+    }
+  } catch {
+    // Continue
+  }
+
+  return accounts
+}
+
 // ============================================================
 // Sending
 // ============================================================

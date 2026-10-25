@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
+  isAllowedMetaOrigin,
+  extractEmbeddedSignupData,
   parseMetaMessageEvent,
   loadFacebookSdk,
   launchEmbeddedSignup,
@@ -79,6 +81,101 @@ describe('Embedded Signup Client Helpers', () => {
     globalThis.document = originalDocument;
   });
 
+  describe('isAllowedMetaOrigin', () => {
+    it('accepts valid Meta origins', () => {
+      expect(isAllowedMetaOrigin('https://facebook.com')).toBe(true);
+      expect(isAllowedMetaOrigin('https://www.facebook.com')).toBe(true);
+      expect(isAllowedMetaOrigin('https://web.facebook.com')).toBe(true);
+      expect(isAllowedMetaOrigin('https://m.facebook.com')).toBe(true);
+      expect(isAllowedMetaOrigin('https://connect.facebook.com')).toBe(true);
+    });
+
+    it('rejects untrusted or invalid origins', () => {
+      expect(isAllowedMetaOrigin('https://malicious-facebook.com')).toBe(false);
+      expect(isAllowedMetaOrigin('https://notfacebook.com')).toBe(false);
+      expect(isAllowedMetaOrigin('http://www.facebook.com')).toBe(false);
+      expect(isAllowedMetaOrigin('javascript:alert(1)')).toBe(false);
+      expect(isAllowedMetaOrigin('')).toBe(false);
+      expect(isAllowedMetaOrigin(null as unknown as string)).toBe(false);
+    });
+  });
+
+  describe('extractEmbeddedSignupData', () => {
+    it('extracts standard snake_case IDs from data wrapper', () => {
+      const res = extractEmbeddedSignupData({
+        data: {
+          waba_id: '999111',
+          phone_number_id: '888222',
+          business_id: '777333',
+          current_step: 'complete',
+        },
+      });
+      expect(res.wabaId).toBe('999111');
+      expect(res.phoneNumberId).toBe('888222');
+      expect(res.businessId).toBe('777333');
+      expect(res.currentStep).toBe('complete');
+    });
+
+    it('extracts camelCase IDs', () => {
+      const res = extractEmbeddedSignupData({
+        data: {
+          wabaId: '12345',
+          phoneNumberId: '67890',
+          businessId: '11223',
+        },
+      });
+      expect(res.wabaId).toBe('12345');
+      expect(res.phoneNumberId).toBe('67890');
+      expect(res.businessId).toBe('11223');
+    });
+
+    it('extracts alternate Meta field names (whatsapp_business_account_id, messaging_account_id)', () => {
+      const res1 = extractEmbeddedSignupData({
+        data: {
+          whatsapp_business_account_id: '555666',
+          owner_business_id: '444333',
+        },
+      });
+      expect(res1.wabaId).toBe('555666');
+      expect(res1.businessId).toBe('444333');
+
+      const res2 = extractEmbeddedSignupData({
+        data: {
+          messaging_account_id: '777888',
+        },
+      });
+      expect(res2.wabaId).toBe('777888');
+    });
+
+    it('extracts from flat top-level payload', () => {
+      const res = extractEmbeddedSignupData({
+        waba_id: '101010',
+        phone_number_id: '202020',
+      });
+      expect(res.wabaId).toBe('101010');
+      expect(res.phoneNumberId).toBe('202020');
+    });
+
+    it('extracts from double-nested data.data structure', () => {
+      const res = extractEmbeddedSignupData({
+        data: {
+          data: {
+            waba_id: '303030',
+            phone_number_id: '404040',
+          },
+        },
+      });
+      expect(res.wabaId).toBe('303030');
+      expect(res.phoneNumberId).toBe('404040');
+    });
+
+    it('returns empty object for null, undefined, or empty objects', () => {
+      expect(extractEmbeddedSignupData(null)).toEqual({});
+      expect(extractEmbeddedSignupData(undefined)).toEqual({});
+      expect(extractEmbeddedSignupData({})).toEqual({});
+    });
+  });
+
   describe('parseMetaMessageEvent', () => {
     it('returns null for non-facebook origins', () => {
       const event = {
@@ -88,10 +185,10 @@ describe('Embedded Signup Client Helpers', () => {
       expect(parseMetaMessageEvent(event)).toBeNull();
     });
 
-    it('returns null for unrelated message types', () => {
+    it('returns null for unrelated message types without finish event', () => {
       const event = {
         origin: 'https://www.facebook.com',
-        data: JSON.stringify({ type: 'SOME_OTHER_EVENT', event: 'FINISH' }),
+        data: JSON.stringify({ type: 'SOME_OTHER_EVENT', event: 'OTHER_ACTION' }),
       } as MessageEvent;
       expect(parseMetaMessageEvent(event)).toBeNull();
     });
@@ -111,6 +208,7 @@ describe('Embedded Signup Client Helpers', () => {
         data: {
           phone_number_id: '123456789',
           waba_id: '987654321',
+          business_id: '555666777',
         },
       };
       const event = {
@@ -123,9 +221,10 @@ describe('Embedded Signup Client Helpers', () => {
       expect(result?.event).toBe('FINISH');
       expect(result?.data?.phone_number_id).toBe('123456789');
       expect(result?.data?.waba_id).toBe('987654321');
+      expect(result?.data?.business_id).toBe('555666777');
     });
 
-    it('successfully parses valid WA_EMBEDDED_SIGNUP object payload', () => {
+    it('successfully parses valid WA_EMBEDDED_SIGNUP object payload from web.facebook.com', () => {
       const payload = {
         type: 'WA_EMBEDDED_SIGNUP',
         event: 'FINISH',
@@ -141,6 +240,49 @@ describe('Embedded Signup Client Helpers', () => {
       const result = parseMetaMessageEvent(event);
       expect(result?.event).toBe('FINISH');
       expect(result?.data?.phone_number_id).toBe('999');
+    });
+
+    it('handles FINISH_ONLY_WABA and FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING events', () => {
+      const event1 = {
+        origin: 'https://facebook.com',
+        data: {
+          type: 'WA_EMBEDDED_SIGNUP',
+          event: 'FINISH_ONLY_WABA',
+          data: { waba_id: 'waba_101' },
+        },
+      } as MessageEvent;
+
+      const res1 = parseMetaMessageEvent(event1);
+      expect(res1?.event).toBe('FINISH_ONLY_WABA');
+      expect(res1?.data?.waba_id).toBe('waba_101');
+
+      const event2 = {
+        origin: 'https://facebook.com',
+        data: {
+          type: 'WA_EMBEDDED_SIGNUP',
+          event: 'FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING',
+          data: { waba_id: 'waba_202', phone_number_id: 'phone_202' },
+        },
+      } as MessageEvent;
+
+      const res2 = parseMetaMessageEvent(event2);
+      expect(res2?.event).toBe('FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING');
+      expect(res2?.data?.waba_id).toBe('waba_202');
+    });
+
+    it('parses payloads where inner data was serialized as string', () => {
+      const event = {
+        origin: 'https://www.facebook.com',
+        data: {
+          type: 'WA_EMBEDDED_SIGNUP',
+          event: 'FINISH',
+          data: JSON.stringify({ waba_id: 'stringified_waba', phone_number_id: 'stringified_phone' }),
+        },
+      } as unknown as MessageEvent;
+
+      const res = parseMetaMessageEvent(event);
+      expect(res?.data?.waba_id).toBe('stringified_waba');
+      expect(res?.data?.phone_number_id).toBe('stringified_phone');
     });
   });
 
@@ -246,6 +388,7 @@ describe('Embedded Signup Client Helpers', () => {
           data: {
             phone_number_id: 'phone_999',
             waba_id: 'waba_888',
+            business_id: 'biz_777',
           },
         }),
       });
@@ -261,6 +404,42 @@ describe('Embedded Signup Client Helpers', () => {
         code: 'auth_code_123',
         phoneNumberId: 'phone_999',
         wabaId: 'waba_888',
+        businessId: 'biz_777',
+        event: 'FINISH',
+      });
+    });
+
+    it('successfully calls onSuccess with code when postMessage event does not contain WABA ID', async () => {
+      let loginCallback: ((res: { authResponse?: { code?: string } }) => void) | null = null;
+
+      mockWindow.FB = {
+        init: vi.fn(),
+        login: vi.fn().mockImplementation((cb: (res: { authResponse?: { code?: string } }) => void) => {
+          loginCallback = cb;
+        }),
+      };
+
+      const onSuccess = vi.fn();
+
+      await launchEmbeddedSignup({
+        appId: 'app_123',
+        configId: 'cfg_456',
+        onSuccess,
+      });
+
+      // Trigger login callback without any preceding message event
+      if (loginCallback) {
+        (loginCallback as (res: { authResponse?: { code?: string } }) => void)({
+          authResponse: { code: 'code_without_message_ids' },
+        });
+      }
+
+      expect(onSuccess).toHaveBeenCalledWith({
+        code: 'code_without_message_ids',
+        phoneNumberId: undefined,
+        wabaId: undefined,
+        businessId: undefined,
+        event: undefined,
       });
     });
 
@@ -284,6 +463,88 @@ describe('Embedded Signup Client Helpers', () => {
 
       expect(onCancel).toHaveBeenCalled();
       expect(onSuccess).not.toHaveBeenCalled();
+    });
+
+    it('passes currentStep to onCancel when user cancels during phone selection', async () => {
+      let loginCallback: ((res: { authResponse?: { code?: string } | null }) => void) | null = null;
+
+      mockWindow.FB = {
+        init: vi.fn(),
+        login: vi.fn().mockImplementation((cb: (res: { authResponse?: { code?: string } | null }) => void) => {
+          loginCallback = cb;
+        }),
+      };
+
+      const onCancel = vi.fn();
+
+      await launchEmbeddedSignup({
+        appId: 'app_123',
+        configId: 'cfg_456',
+        onSuccess: vi.fn(),
+        onCancel,
+      });
+
+      mockWindow.dispatchEvent({
+        type: 'message',
+        origin: 'https://www.facebook.com',
+        data: JSON.stringify({
+          type: 'WA_EMBEDDED_SIGNUP',
+          event: 'CANCEL',
+          data: {
+            current_step: 'WABA_PHONE_PROFILE_PICKER',
+          },
+        }),
+      });
+
+      if (loginCallback) {
+        (loginCallback as (res: { authResponse?: { code?: string } | null }) => void)({
+          authResponse: null,
+        });
+      }
+
+      expect(onCancel).toHaveBeenCalledWith(
+        expect.objectContaining({
+          currentStep: 'WABA_PHONE_PROFILE_PICKER',
+        })
+      );
+    });
+
+    it('handles ERROR event from Meta with error details and step', async () => {
+      mockWindow.FB = {
+        init: vi.fn(),
+        login: vi.fn(),
+      };
+
+      const onError = vi.fn();
+
+      await launchEmbeddedSignup({
+        appId: 'app_123',
+        configId: 'cfg_456',
+        onSuccess: vi.fn(),
+        onError,
+      });
+
+      mockWindow.dispatchEvent({
+        type: 'message',
+        origin: 'https://www.facebook.com',
+        data: JSON.stringify({
+          type: 'WA_EMBEDDED_SIGNUP',
+          event: 'ERROR',
+          error_message: 'Unsupported WhatsApp business account type',
+          data: {
+            current_step: 'WABA_PHONE_PROFILE_PICKER',
+          },
+        }),
+      });
+
+      expect(onError).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: 'Unsupported WhatsApp business account type',
+        }),
+        expect.objectContaining({
+          currentStep: 'WABA_PHONE_PROFILE_PICKER',
+        })
+      );
     });
   });
 });

@@ -105,6 +105,10 @@ function getRedisConfig(): { url: string; token: string } | null {
     '';
 
   if (!url || !token) return null;
+  if (!url.startsWith('https://') && !url.startsWith('http://localhost') && !url.startsWith('http://127.0.0.1')) {
+    console.warn('[rate-limit] UPSTASH_REDIS_REST_URL must use HTTPS protocol');
+    return null;
+  }
   return { url: url.replace(/\/+$/, ''), token };
 }
 
@@ -133,7 +137,7 @@ async function checkRedis(
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(pipeline),
-    signal: AbortSignal.timeout(2500),
+    signal: AbortSignal.timeout(4000),
   });
 
   if (!res.ok) {

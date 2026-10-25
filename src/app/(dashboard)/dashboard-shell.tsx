@@ -26,6 +26,7 @@ function DashboardShellInner({ children }: { children: React.ReactNode }) {
     account,
     loading,
     accountStatus,
+    isPlatformOwner,
     refreshProfile,
     signOut,
   } = useAuth();
@@ -57,10 +58,12 @@ function DashboardShellInner({ children }: { children: React.ReactNode }) {
 
   if (!user) return null;
 
-  // The private /admin route has its own platform admin authorization gate
+  // The private /admin route has its own platform admin authorization gate.
+  // The verified permanent Platform Owner is also never blocked by tenant status screens.
   const isAdminRoute = pathname?.startsWith("/admin");
+  const isExemptFromStatusGate = isAdminRoute || isPlatformOwner;
 
-  if (!isAdminRoute) {
+  if (!isExemptFromStatusGate) {
     if (accountStatus === "pending") {
       return (
         <AccountPendingScreen

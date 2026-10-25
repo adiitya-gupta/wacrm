@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { requirePlatformAdmin } from '@/lib/admin/auth';
+import { requirePlatformAdmin, isProtectedOwnerAccount } from '@/lib/admin/auth';
 import { toErrorResponse } from '@/lib/auth/account';
 import { supabaseAdmin } from '@/lib/flows/admin-client';
 import { isApprovalStatus, type ApprovalStatus } from '@/lib/auth/approval';
@@ -54,6 +54,15 @@ export async function POST(
 
     if (fetchErr || !targetAccount) {
       return NextResponse.json({ error: 'Target account not found' }, { status: 404 });
+    }
+
+    // Owner protection: The permanent Platform Owner cannot be suspended or rejected
+    const { isProtected: isTargetOwnerProtected } = await isProtectedOwnerAccount(accountId, db);
+    if (isTargetOwnerProtected && (action === 'suspend' || action === 'reject')) {
+      return NextResponse.json(
+        { error: 'Cannot suspend or reject the permanent Platform Owner account' },
+        { status: 403 }
+      );
     }
 
     // Get owner profile email for audit log

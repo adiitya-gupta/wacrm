@@ -22,6 +22,7 @@ import { NextResponse } from "next/server";
 import type { PostgrestError } from "@supabase/supabase-js";
 
 import { requireRole, toErrorResponse } from "@/lib/auth/account";
+import { isProtectedOwnerAccount } from "@/lib/admin/auth";
 import {
   checkRateLimit,
   rateLimitResponse,
@@ -61,6 +62,15 @@ export async function POST(request: Request) {
     // this too, but failing fast here saves a Supabase round trip
     // on the obvious "admin trying to transfer" case.
     const ctx = await requireRole("owner");
+
+    // Owner protection: The permanent Platform Owner workspace cannot have ownership transferred away
+    const { isProtected } = await isProtectedOwnerAccount(ctx.accountId);
+    if (isProtected) {
+      return NextResponse.json(
+        { error: 'Cannot transfer ownership of the permanent Platform Owner workspace' },
+        { status: 403 }
+      );
+    }
 
     // Rate-limit owner-only transfers. Legitimate use is one click
     // every few months at most; a script run in a loop would

@@ -50,6 +50,7 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog';
 import { toast } from 'sonner';
+import { isPermanentPlatformOwner } from '@/lib/admin/owner';
 
 interface AccountRecord {
   id: string;
@@ -632,10 +633,19 @@ export default function AdminPage() {
                       }
                     };
 
+                    const isOwnerAccount = isPermanentPlatformOwner(acc.owner_email);
+
                     return (
                       <tr key={acc.id} className="hover:bg-muted/20 transition-colors">
                         <td className="p-3">
-                          <div className="font-semibold text-foreground">{acc.name}</div>
+                          <div className="flex items-center gap-2">
+                            <span className="font-semibold text-foreground">{acc.name}</span>
+                            {isOwnerAccount && (
+                              <Badge className="bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/30 text-[10px] font-medium">
+                                Platform Owner
+                              </Badge>
+                            )}
+                          </div>
                           <div className="text-[10px] text-muted-foreground font-mono">{acc.id}</div>
                         </td>
                         <td className="p-3">
@@ -657,57 +667,75 @@ export default function AdminPage() {
                         </td>
                         <td className="p-3 text-right">
                           <div className="flex items-center justify-end gap-1.5">
-                            {acc.approval_status === 'pending' && (
+                            {isOwnerAccount ? (
+                              acc.approval_status === 'suspended' ? (
+                                <Button
+                                  size="sm"
+                                  onClick={() => openStatusActionModal(acc, 'reactivate')}
+                                  className="h-7 text-xs bg-amber-500 hover:bg-amber-600 text-white font-medium shadow-sm"
+                                >
+                                  <RotateCcw className="mr-1 h-3.5 w-3.5" /> Restore Owner Access
+                                </Button>
+                              ) : (
+                                <span className="inline-flex items-center text-xs text-muted-foreground px-2.5 py-1 rounded-md bg-muted/50 border border-border">
+                                  <ShieldCheck className="mr-1 h-3.5 w-3.5 text-purple-500" /> Protected
+                                </span>
+                              )
+                            ) : (
                               <>
-                                <Button
-                                  size="sm"
-                                  onClick={() => openStatusActionModal(acc, 'approve')}
-                                  className="h-7 text-xs bg-emerald-600 hover:bg-emerald-700 text-white"
-                                >
-                                  <UserCheck className="mr-1 h-3.5 w-3.5" /> Approve
-                                </Button>
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  onClick={() => openStatusActionModal(acc, 'reject')}
-                                  className="h-7 text-xs text-red-500 hover:bg-red-500/10 border-red-500/30"
-                                >
-                                  <UserX className="mr-1 h-3.5 w-3.5" /> Reject
-                                </Button>
+                                {acc.approval_status === 'pending' && (
+                                  <>
+                                    <Button
+                                      size="sm"
+                                      onClick={() => openStatusActionModal(acc, 'approve')}
+                                      className="h-7 text-xs bg-emerald-600 hover:bg-emerald-700 text-white"
+                                    >
+                                      <UserCheck className="mr-1 h-3.5 w-3.5" /> Approve
+                                    </Button>
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      onClick={() => openStatusActionModal(acc, 'reject')}
+                                      className="h-7 text-xs text-red-500 hover:bg-red-500/10 border-red-500/30"
+                                    >
+                                      <UserX className="mr-1 h-3.5 w-3.5" /> Reject
+                                    </Button>
+                                  </>
+                                )}
+
+                                {acc.approval_status === 'approved' && (
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => openStatusActionModal(acc, 'suspend')}
+                                    className="h-7 text-xs text-amber-500 hover:bg-amber-500/10 border-amber-500/30"
+                                  >
+                                    <Ban className="mr-1 h-3.5 w-3.5" /> Suspend
+                                  </Button>
+                                )}
+
+                                {acc.approval_status === 'suspended' && (
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => openStatusActionModal(acc, 'reactivate')}
+                                    className="h-7 text-xs text-emerald-500 hover:bg-emerald-500/10 border-emerald-500/30"
+                                  >
+                                    <RotateCcw className="mr-1 h-3.5 w-3.5" /> Reactivate
+                                  </Button>
+                                )}
+
+                                {acc.approval_status === 'rejected' && (
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => openStatusActionModal(acc, 'approve')}
+                                    className="h-7 text-xs text-emerald-500 hover:bg-emerald-500/10 border-emerald-500/30"
+                                  >
+                                    <UserCheck className="mr-1 h-3.5 w-3.5" /> Reconsider & Approve
+                                  </Button>
+                                )}
                               </>
-                            )}
-
-                            {acc.approval_status === 'approved' && (
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() => openStatusActionModal(acc, 'suspend')}
-                                className="h-7 text-xs text-amber-500 hover:bg-amber-500/10 border-amber-500/30"
-                              >
-                                <Ban className="mr-1 h-3.5 w-3.5" /> Suspend
-                              </Button>
-                            )}
-
-                            {acc.approval_status === 'suspended' && (
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() => openStatusActionModal(acc, 'reactivate')}
-                                className="h-7 text-xs text-emerald-500 hover:bg-emerald-500/10 border-emerald-500/30"
-                              >
-                                <RotateCcw className="mr-1 h-3.5 w-3.5" /> Reactivate
-                              </Button>
-                            )}
-
-                            {acc.approval_status === 'rejected' && (
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() => openStatusActionModal(acc, 'approve')}
-                                className="h-7 text-xs text-emerald-500 hover:bg-emerald-500/10 border-emerald-500/30"
-                              >
-                                <UserCheck className="mr-1 h-3.5 w-3.5" /> Reconsider & Approve
-                              </Button>
                             )}
 
                             <Button
@@ -899,65 +927,94 @@ export default function AdminPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-border text-xs">
-                {filteredTenants.map((t) => (
-                  <tr key={t.id} className="hover:bg-muted/20">
-                    <td className="p-3 font-semibold text-foreground">{t.name}</td>
-                    <td className="p-3 text-muted-foreground">{t.owner_email}</td>
-                    <td className="p-3">
-                      <Badge variant="outline">
-                        {t.acquisition_model === 'managed' ? 'OPSIYS Managed' : 'Self-Serve'}
-                      </Badge>
-                    </td>
-                    <td className="p-3 font-medium text-foreground">
-                      {t.subscription?.plan_id || 'starter'}
-                    </td>
-                    <td className="p-3">
-                      {t.whatsapp_connected ? (
-                        <span className="flex items-center gap-1 text-emerald-500 font-medium">
-                          <CheckCircle2 className="h-3.5 w-3.5" /> Connected
-                        </span>
-                      ) : (
-                        <span className="text-muted-foreground">Not connected</span>
-                      )}
-                    </td>
-                    <td className="p-3">
-                      {t.is_suspended ? (
-                        <Badge variant="destructive">Suspended</Badge>
-                      ) : (
-                        <Badge className="bg-emerald-500/10 text-emerald-500 border-emerald-500/20">
-                          Active
-                        </Badge>
-                      )}
-                    </td>
-                    <td className="p-3 text-right">
-                      <div className="flex items-center justify-end gap-1.5">
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          title="Generate password reset link"
-                          onClick={() => handleInitiatePasswordReset(t.id, t.owner_email)}
-                          disabled={resettingPasswordId === t.id}
-                          className="h-7 text-xs text-sky-500 hover:bg-sky-500/10 border-sky-500/30"
-                        >
-                          {resettingPasswordId === t.id ? (
-                            <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
-                          ) : (
-                            <KeyRound className="mr-1 h-3.5 w-3.5" />
+                {filteredTenants.map((t) => {
+                  const isOwnerTenant = isPermanentPlatformOwner(t.owner_email);
+
+                  return (
+                    <tr key={t.id} className="hover:bg-muted/20">
+                      <td className="p-3">
+                        <div className="flex items-center gap-2">
+                          <span className="font-semibold text-foreground">{t.name}</span>
+                          {isOwnerTenant && (
+                            <Badge className="bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/30 text-[10px] font-medium">
+                              Platform Owner
+                            </Badge>
                           )}
-                          Reset Password
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() => handleToggleSuspend(t.id, Boolean(t.is_suspended))}
-                          className={`h-7 text-xs ${t.is_suspended ? 'text-emerald-500' : 'text-red-400'}`}
-                        >
-                          {t.is_suspended ? 'Unsuspend' : 'Suspend'}
-                        </Button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                        </div>
+                      </td>
+                      <td className="p-3 text-muted-foreground">{t.owner_email}</td>
+                      <td className="p-3">
+                        <Badge variant="outline">
+                          {t.acquisition_model === 'managed' ? 'OPSIYS Managed' : 'Self-Serve'}
+                        </Badge>
+                      </td>
+                      <td className="p-3 font-medium text-foreground">
+                        {t.subscription?.plan_id || 'starter'}
+                      </td>
+                      <td className="p-3">
+                        {t.whatsapp_connected ? (
+                          <span className="flex items-center gap-1 text-emerald-500 font-medium">
+                            <CheckCircle2 className="h-3.5 w-3.5" /> Connected
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground">Not connected</span>
+                        )}
+                      </td>
+                      <td className="p-3">
+                        {t.is_suspended ? (
+                          <Badge variant="destructive">Suspended</Badge>
+                        ) : (
+                          <Badge className="bg-emerald-500/10 text-emerald-500 border-emerald-500/20">
+                            Active
+                          </Badge>
+                        )}
+                      </td>
+                      <td className="p-3 text-right">
+                        <div className="flex items-center justify-end gap-1.5">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            title="Generate password reset link"
+                            onClick={() => handleInitiatePasswordReset(t.id, t.owner_email)}
+                            disabled={resettingPasswordId === t.id}
+                            className="h-7 text-xs text-sky-500 hover:bg-sky-500/10 border-sky-500/30"
+                          >
+                            {resettingPasswordId === t.id ? (
+                              <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <KeyRound className="mr-1 h-3.5 w-3.5" />
+                            )}
+                            Reset Password
+                          </Button>
+                          {isOwnerTenant ? (
+                            t.is_suspended ? (
+                              <Button
+                                size="sm"
+                                onClick={() => handleToggleSuspend(t.id, true)}
+                                className="h-7 text-xs bg-amber-500 hover:bg-amber-600 text-white font-medium"
+                              >
+                                <RotateCcw className="mr-1 h-3.5 w-3.5" /> Restore Owner
+                              </Button>
+                            ) : (
+                              <span className="inline-flex items-center text-xs text-muted-foreground px-2.5 py-1 rounded-md bg-muted/50 border border-border">
+                                <ShieldCheck className="mr-1 h-3.5 w-3.5 text-purple-500" /> Protected
+                              </span>
+                            )
+                          ) : (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => handleToggleSuspend(t.id, Boolean(t.is_suspended))}
+                              className={`h-7 text-xs ${t.is_suspended ? 'text-emerald-500' : 'text-red-400'}`}
+                            >
+                              {t.is_suspended ? 'Unsuspend' : 'Suspend'}
+                            </Button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

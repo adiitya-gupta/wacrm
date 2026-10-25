@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { requirePlatformAdmin } from '@/lib/admin/auth';
+import { requirePlatformAdmin, isProtectedOwnerAccount } from '@/lib/admin/auth';
 import { toErrorResponse } from '@/lib/auth/account';
 import { supabaseAdmin } from '@/lib/flows/admin-client';
 
@@ -15,6 +15,16 @@ export async function POST(
     const reason = body.reason ? String(body.reason).trim() : null;
 
     const db = supabaseAdmin();
+
+    // Owner protection: The permanent Platform Owner cannot be suspended
+    const { isProtected } = await isProtectedOwnerAccount(id, db);
+    if (isProtected && is_suspended) {
+      return NextResponse.json(
+        { error: 'Cannot suspend the permanent Platform Owner account' },
+        { status: 403 }
+      );
+    }
+
     const now = new Date().toISOString();
     const newStatus = is_suspended ? 'suspended' : 'approved';
 

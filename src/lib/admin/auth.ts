@@ -7,15 +7,12 @@ import {
 import { createClient } from '@/lib/supabase/server';
 import { supabaseAdmin } from '@/lib/flows/admin-client';
 
-// Canonical platform owner emails known across migrations and repo configuration
-const DESIGNATED_OWNER_EMAILS = [
-  'adityaofficial9918@gmail.com',
-  'adityaofficial2018@gmail.com',
-];
+import { PERMANENT_PLATFORM_OWNER_EMAIL, isPermanentPlatformOwner } from './owner';
+export { PERMANENT_PLATFORM_OWNER_EMAIL, isPermanentPlatformOwner };
 
 /**
  * Retrieve the set of all authorized platform administrator emails from
- * all supported environment variable aliases and built-in designated owners.
+ * all supported environment variable aliases and the canonical platform owner.
  */
 export function getPlatformAdminEmails(): string[] {
   const envVars = [
@@ -27,10 +24,7 @@ export function getPlatformAdminEmails(): string[] {
   ];
 
   const emails = new Set<string>();
-
-  for (const email of DESIGNATED_OWNER_EMAILS) {
-    emails.add(email.trim().toLowerCase());
-  }
+  emails.add(PERMANENT_PLATFORM_OWNER_EMAIL.toLowerCase());
 
   for (const raw of envVars) {
     if (!raw) continue;
@@ -46,7 +40,7 @@ export function getPlatformAdminEmails(): string[] {
 
 /**
  * Check whether a given account context or email represents an authorized platform administrator.
- * Evaluates against OPSIYS_ACCOUNT_ID and PLATFORM_ADMIN_EMAILS (including aliases).
+ * Evaluates against OPSIYS_ACCOUNT_ID (for account owner/admin) and authorized administrator emails.
  */
 export function isPlatformAdmin(ctx: {
   accountId?: string | null;
@@ -73,8 +67,107 @@ export function isPlatformAdmin(ctx: {
   return false;
 }
 
+/**
+ * Verify whether a database account belongs to or was provisioned for the permanent Platform Owner.
+ */
+export async function isProtectedOwnerAccount(
+  accountId: string,
+  db = supabaseAdmin()
+): Promise<{
+  isProtected: boolean;
+  ownerEmail?: string | null;
+  ownerUserId?: string | null;
+}> {
+  if (!accountId) return { isProtected: false };
+
+  const opsiysAccountId =
+    process.env.OPSIYS_ACCOUNT_ID?.trim() || '7498de6d-f333-457d-8545-ef34fdd10c54';
+
+  if (accountId === opsiysAccountId) {
+    return {
+      isProtected: true,
+      ownerEmail: PERMANENT_PLATFORM_OWNER_EMAIL,
+    };
+  }
+
+  try {
+    const { data: account } = await db
+      .from('accounts')
+      .select('id, owner_user_id')
+      .eq('id', accountId)
+      .maybeSingle();
+
+    const { data: profiles } = await db
+      .from('profiles')
+      .select('email, user_id, account_role')
+      .eq('account_id', accountId);
+
+    if (profiles && profiles.length > 0) {
+      for (const p of profiles) {
+        if (p.email && isPermanentPlatformOwner(p.email)) {
+          return {
+            isProtected: true,
+            ownerEmail: p.email,
+            ownerUserId: p.user_id,
+          };
+        }
+      }
+    }
+
+    if (account?.owner_user_id) {
+      const { data: authUser } = await db.auth.admin.getUserById(account.owner_user_id);
+      if (authUser?.user?.email && isPermanentPlatformOwner(authUser.user.email)) {
+        return {
+          isProtected: true,
+          ownerEmail: authUser.user.email,
+          ownerUserId: account.owner_user_id,
+        };
+      }
+    }
+  } catch (err) {
+    console.error('[isProtectedOwnerAccount] error inspecting account:', err);
+  }
+
+  return { isProtected: false };
+}
+
+/**
+ * Verify whether a user is the permanent Platform Owner.
+ */
+export async function isProtectedOwnerUser(
+  userId: string,
+  db = supabaseAdmin()
+): Promise<{
+  isProtected: boolean;
+  email?: string | null;
+}> {
+  if (!userId) return { isProtected: false };
+
+  try {
+    const { data: profile } = await db
+      .from('profiles')
+      .select('email')
+      .eq('user_id', userId)
+      .maybeSingle();
+
+    if (profile?.email && isPermanentPlatformOwner(profile.email)) {
+      return { isProtected: true, email: profile.email };
+    }
+
+    const { data: authUser } = await db.auth.admin.getUserById(userId);
+    if (authUser?.user?.email && isPermanentPlatformOwner(authUser.user.email)) {
+      return { isProtected: true, email: authUser.user.email };
+    }
+  } catch (err) {
+    console.error('[isProtectedOwnerUser] error inspecting user:', err);
+  }
+
+  return { isProtected: false };
+}
+
 export interface AdminContext extends AccountContext {
   isPlatformAdmin: true;
+  isPlatformOwner: boolean;
   callerEmail: string;
 }
 
@@ -94,42 +187,15 @@ export async function requirePlatformAdmin(): Promise<AdminContext> {
 
   const email = (authUser.email || '').trim().toLowerCase();
 
-  // Evaluate platform administrator status
-  let allowed = isPlatformAdmin({ email });
+  // Evaluate platform administrator status strictly based on verified email
+  const allowed = isPlatformAdmin({ email });
 
   let accountContext: AccountContext | null = null;
   try {
     accountContext = await getCurrentAccount();
-    if (!allowed && accountContext) {
-      allowed = isPlatformAdmin({
-        accountId: accountContext.accountId,
-        email,
-        role: accountContext.role,
-      });
-    }
   } catch {
-    // If getCurrentAccount throws because of a missing profile or pending tenant account,
-    // check database profile directly via admin client to avoid false-negative lockouts.
-    if (!allowed) {
-      try {
-        const db = supabaseAdmin();
-        const { data: prof } = await db
-          .from('profiles')
-          .select('account_id, account_role')
-          .eq('user_id', authUser.id)
-          .maybeSingle();
-
-        if (prof) {
-          allowed = isPlatformAdmin({
-            accountId: prof.account_id,
-            email,
-            role: prof.account_role,
-          });
-        }
-      } catch {
-        // Fallback continues
-      }
-    }
+    // If getCurrentAccount throws because of an unlinked profile or pending tenant account,
+    // platform administrator access remains valid based on verified auth identity.
   }
 
   if (!allowed) {
@@ -168,6 +234,7 @@ export async function requirePlatformAdmin(): Promise<AdminContext> {
   return {
     ...accountContext,
     isPlatformAdmin: true,
+    isPlatformOwner: isPermanentPlatformOwner(email),
     callerEmail: email || 'unknown',
   };
 }

@@ -19,6 +19,7 @@ import type { PostgrestError } from "@supabase/supabase-js";
 
 import { requireRole, toErrorResponse } from "@/lib/auth/account";
 import { isAccountRole } from "@/lib/auth/roles";
+import { isProtectedOwnerUser } from "@/lib/admin/auth";
 import {
   checkRateLimit,
   rateLimitResponse,
@@ -59,6 +60,15 @@ export async function PATCH(
     if (!limit.success) return rateLimitResponse(limit);
 
     const { userId } = await params;
+
+    // Owner protection: The permanent Platform Owner cannot be demoted or modified
+    const { isProtected } = await isProtectedOwnerUser(userId);
+    if (isProtected) {
+      return NextResponse.json(
+        { error: 'Cannot demote or modify the role of the permanent Platform Owner' },
+        { status: 403 }
+      );
+    }
 
     const body = (await request.json().catch(() => null)) as
       | { role?: unknown }
@@ -111,6 +121,15 @@ export async function DELETE(
     if (!limit.success) return rateLimitResponse(limit);
 
     const { userId } = await params;
+
+    // Owner protection: The permanent Platform Owner cannot be removed
+    const { isProtected } = await isProtectedOwnerUser(userId);
+    if (isProtected) {
+      return NextResponse.json(
+        { error: 'Cannot remove the permanent Platform Owner' },
+        { status: 403 }
+      );
+    }
 
     const { data, error } = await ctx.supabase.rpc("remove_account_member", {
       p_user_id: userId,

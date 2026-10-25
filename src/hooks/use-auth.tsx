@@ -20,6 +20,7 @@ import {
   isAccountRole,
   type AccountRole,
 } from "@/lib/auth/roles";
+import { isPermanentPlatformOwner } from "@/lib/admin/owner";
 
 interface Profile {
   id: string;
@@ -143,6 +144,8 @@ interface AuthContextValue {
   canEditSettings: boolean;
   /** True if the caller can send messages and edit operational data (agent+). */
   canSendMessages: boolean;
+  /** True if the caller is the verified permanent Platform Owner. */
+  isPlatformOwner: boolean;
   approvalStatus: ApprovalStatus;
   isApproved: boolean;
   isPending: boolean;
@@ -472,19 +475,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // Default-deny in production if approval status is not set or unverified
   const approval = account?.approval_status ?? (process.env.NODE_ENV === "test" ? "approved" : "pending");
+  const isOwnerIdentity = isPermanentPlatformOwner(user?.email);
+  const effectiveApproval = isOwnerIdentity ? "approved" : approval;
   const accountStatus: AccountStatus = !user
     ? "loading"
     : profileLoading
       ? "loading"
       : !profile
-        ? "error"
+        ? (isOwnerIdentity ? "ready" : "error")
         : !derived.accountId || !derived.accountRole
-          ? "unlinked"
-          : approval === "pending"
+          ? (isOwnerIdentity ? "ready" : "unlinked")
+          : effectiveApproval === "pending"
             ? "pending"
-            : approval === "rejected"
+            : effectiveApproval === "rejected"
               ? "rejected"
-              : approval === "suspended"
+              : effectiveApproval === "suspended"
                 ? "suspended"
                 : "ready";
 
@@ -501,11 +506,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         defaultCurrency: account?.default_currency ?? DEFAULT_CURRENCY,
         accountStatus,
         accountStatusDetail: statusDetail,
-        approvalStatus: approval,
-        isApproved: approval === "approved",
-        isPending: approval === "pending",
-        isRejected: approval === "rejected",
-        isSuspended: approval === "suspended",
+        isPlatformOwner: isOwnerIdentity,
+        approvalStatus: effectiveApproval,
+        isApproved: effectiveApproval === "approved",
+        isPending: effectiveApproval === "pending",
+        isRejected: effectiveApproval === "rejected",
+        isSuspended: effectiveApproval === "suspended",
         statusReason: account?.status_reason ?? null,
         ...derived,
       }}
@@ -550,6 +556,7 @@ export function useAuth(): AuthContextValue {
       canManageMembers: false,
       canEditSettings: false,
       canSendMessages: false,
+      isPlatformOwner: false,
       approvalStatus: "pending",
       isApproved: false,
       isPending: false,

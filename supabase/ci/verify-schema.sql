@@ -133,6 +133,20 @@ BEGIN
       'idx_automation_pending_awaiting_reply is missing — migration 045 did not apply';
   END IF;
 
+  -- 052 installs triggers protecting the permanent platform owner.
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_trigger
+    WHERE tgname = 'trg_enforce_platform_owner_accounts'
+  ) THEN
+    RAISE EXCEPTION 'trg_enforce_platform_owner_accounts is missing — migration 052 did not apply';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_trigger
+    WHERE tgname = 'trg_enforce_platform_owner_profiles'
+  ) THEN
+    RAISE EXCEPTION 'trg_enforce_platform_owner_profiles is missing — migration 052 did not apply';
+  END IF;
+
   RAISE NOTICE 'schema verification passed';
 END
 $$;

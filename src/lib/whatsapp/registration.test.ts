@@ -46,6 +46,21 @@ describe('registerPhoneNumber', () => {
     });
   });
 
+  it('supports PIN-less registration for accounts where Meta 2FA PIN is omitted/deprecated', async () => {
+    const result = await registerPhoneNumber({
+      phoneNumberId: 'PNID_NO_PIN',
+      accessToken: 'tok',
+    });
+    expect(result).toEqual({ success: true, alreadyRegistered: false });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toContain('/PNID_NO_PIN/register');
+    expect(init.method).toBe('POST');
+    expect(init.headers.Authorization).toBe('Bearer tok');
+    expect(JSON.parse(init.body)).toEqual({
+      messaging_product: 'whatsapp',
+    });
+  });
+
   it('treats "already registered" as success (idempotent re-save)', async () => {
     // This is the silent-failure case we're guarding against — Meta
     // returns 400 + "Phone number is already registered" when the

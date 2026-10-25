@@ -31,7 +31,7 @@ import {
 // The `after()` callback in POST runs within this route's max duration.
 // Inbound processing can fan out to per-media Meta verification calls, so
 // give it headroom beyond the platform default (Vercel clamps this to the
-// plan's ceiling). Tune as needed.
+export const dynamic = 'force-dynamic'
 export const maxDuration = 60
 
 // Lazy-initialized to avoid build-time crash when env vars are missing
@@ -170,7 +170,8 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url)
     const mode = searchParams.get('hub.mode') || searchParams.get('hub_mode')
     const challenge = searchParams.get('hub.challenge') || searchParams.get('hub_challenge')
-    const verifyToken = searchParams.get('hub.verify_token') || searchParams.get('hub_verify_token')
+    const rawVerifyToken = searchParams.get('hub.verify_token') || searchParams.get('hub_verify_token')
+    const verifyToken = rawVerifyToken?.trim().replace(/^["']|["']$/g, '').trim()
 
     if (!mode || !challenge || !verifyToken) {
       return NextResponse.json(
@@ -191,13 +192,15 @@ export async function GET(request: Request) {
     const platformSecrets = [
       process.env.WHATSAPP_VERIFY_TOKEN,
       process.env.META_VERIFY_TOKEN,
+      process.env.META_WEBHOOK_VERIFY_TOKEN,
+      process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN,
     ].filter(Boolean) as string[]
 
     const candidateTokens: string[] = []
     for (const raw of platformSecrets) {
       for (const token of raw.split(',')) {
-        const trimmed = token.trim()
-        if (trimmed) candidateTokens.push(trimmed)
+        const clean = token.trim().replace(/^["']|["']$/g, '').trim()
+        if (clean) candidateTokens.push(clean)
       }
     }
 

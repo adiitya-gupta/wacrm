@@ -30,6 +30,7 @@ import {
   AccordionTrigger,
   AccordionContent,
 } from '@/components/ui/accordion';
+import { launchEmbeddedSignup } from '@/lib/whatsapp/embedded-signup';
 import type { WhatsAppConfig as WhatsAppConfigType } from '@/types';
 
 const MASKED_TOKEN = '••••••••••••••••';
@@ -78,6 +79,7 @@ export function WhatsAppConfig() {
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [embeddedConnecting, setEmbeddedConnecting] = useState(false);
   const [testing, setTesting] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [showToken, setShowToken] = useState(false);
@@ -254,6 +256,92 @@ export function WhatsAppConfig() {
       toast.error(t('mirrorInboundSaveFailed'));
     } finally {
       setSavingMirror(false);
+    }
+  }
+
+  async function handleConnectWhatsApp() {
+    if (!canEditSettings) return;
+
+    const appId = (
+      process.env.NEXT_PUBLIC_META_APP_ID ||
+      ''
+    ).trim();
+    const configId = (
+      process.env.NEXT_PUBLIC_META_CONFIG_ID ||
+      ''
+    ).trim();
+
+    if (!appId || !configId) {
+      toast.error(
+        t('metaConfigMissing', {
+          defaultMessage:
+            'Meta App ID or Configuration ID is not configured in environment variables.',
+        })
+      );
+      return;
+    }
+
+    setEmbeddedConnecting(true);
+
+    try {
+      await launchEmbeddedSignup({
+        appId,
+        configId,
+        onSuccess: async (auth) => {
+          try {
+            const res = await fetch('/api/whatsapp/embedded-signup', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                code: auth.code,
+                waba_id: auth.wabaId,
+                phone_number_id: auth.phoneNumberId,
+              }),
+            });
+
+            const data = await res.json();
+            if (!res.ok) {
+              throw new Error(data.error || 'Failed to exchange token with Meta.');
+            }
+
+            toast.success(
+              t('embeddedSignupSuccess', {
+                defaultMessage: 'WhatsApp account connected successfully.',
+              })
+            );
+
+            if (accountId) {
+              await fetchConfig(accountId);
+            }
+          } catch (exchangeErr) {
+            console.error('Embedded signup exchange failed:', exchangeErr);
+            toast.error(
+              exchangeErr instanceof Error
+                ? exchangeErr.message
+                : 'Failed to connect WhatsApp account'
+            );
+          } finally {
+            setEmbeddedConnecting(false);
+          }
+        },
+        onCancel: () => {
+          setEmbeddedConnecting(false);
+          toast.info(
+            t('embeddedSignupCancelled', {
+              defaultMessage: 'WhatsApp Embedded Signup was cancelled.',
+            })
+          );
+        },
+        onError: (err) => {
+          setEmbeddedConnecting(false);
+          console.error('Embedded signup error:', err);
+          toast.error(err.message || 'WhatsApp Embedded Signup encountered an error');
+        },
+      });
+    } catch (err) {
+      setEmbeddedConnecting(false);
+      console.error('Failed to launch Embedded Signup:', err);
+      toast.error(err instanceof Error ? err.message : 'Failed to launch Embedded Signup');
     }
   }
 
@@ -720,92 +808,176 @@ export function WhatsAppConfig() {
           </Alert>
         )}
 
-        {/* API Credentials */}
-        <Card>
+        {/* One-Click Meta WhatsApp Embedded Signup */}
+        <Card className="border-emerald-500/30 bg-emerald-50/40 dark:bg-emerald-950/20 shadow-xs">
           <CardHeader>
-            <CardTitle className="text-foreground">{t('apiCredentialsTitle')}</CardTitle>
-            <CardDescription className="text-muted-foreground">
-              {t('apiCredentialsDesc')}
-            </CardDescription>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="flex size-9 items-center justify-center rounded-lg bg-emerald-600 text-white shadow-xs">
+                  <Zap className="size-4" />
+                </div>
+                <div>
+                  <CardTitle className="text-foreground text-base">
+                    {t('embeddedSignupTitle', { defaultMessage: 'One-Click WhatsApp Setup' })}
+                  </CardTitle>
+                  <CardDescription className="text-muted-foreground text-xs">
+                    {t('embeddedSignupDesc', {
+                      defaultMessage:
+                        'Connect your WhatsApp Business number automatically with Meta Embedded Signup in seconds without manually copying tokens.',
+                    })}
+                  </CardDescription>
+                </div>
+              </div>
+              <span className="inline-flex items-center rounded-full bg-emerald-500/10 px-2.5 py-0.5 text-xs font-semibold text-emerald-700 dark:text-emerald-400 border border-emerald-500/20">
+                Recommended
+              </span>
+            </div>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="space-y-2">
-              <Label className="text-muted-foreground">{t('phoneNumberId')}</Label>
-              <Input
-                placeholder={t('phoneNumberIdPlaceholder')}
-                value={phoneNumberId}
-                onChange={(e) => setPhoneNumberId(e.target.value)}
-                className="bg-muted border-border text-foreground placeholder:text-muted-foreground"
-              />
-            </div>
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              Log in with Facebook to select your WhatsApp Business Account and phone number. Wattomation will automatically link the account, grant required permissions, and subscribe webhooks.
+            </p>
 
-            <div className="space-y-2">
-              <Label className="text-muted-foreground">{t('wabaId')}</Label>
-              <Input
-                placeholder={t('wabaIdPlaceholder')}
-                value={wabaId}
-                onChange={(e) => setWabaId(e.target.value)}
-                className="bg-muted border-border text-foreground placeholder:text-muted-foreground"
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label className="text-muted-foreground">{t('accessToken')}</Label>
-              <div className="relative">
-                <Input
-                  type={showToken ? 'text' : 'password'}
-                  placeholder={t('accessTokenPlaceholder')}
-                  value={accessToken}
-                  onChange={(e) => {
-                    setAccessToken(e.target.value);
-                    setTokenEdited(true);
-                  }}
-                  onFocus={() => {
-                    if (accessToken === MASKED_TOKEN) {
-                      setAccessToken('');
-                      setTokenEdited(true);
-                    }
-                  }}
-                  className="bg-muted border-border text-foreground placeholder:text-muted-foreground pr-10"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowToken(!showToken)}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
-                >
-                  {showToken ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-                </button>
-              </div>
-              {config && !tokenEdited && (
-                <p className="text-xs text-muted-foreground">
-                  {t('tokenHidden')}
-                </p>
+            <div className="flex flex-wrap items-center gap-3">
+              <Button
+                id="connect-whatsapp-btn"
+                onClick={handleConnectWhatsApp}
+                disabled={embeddedConnecting || !canEditSettings}
+                className="bg-[#25D366] hover:bg-[#20BD5A] text-white font-medium shadow-xs"
+              >
+                {embeddedConnecting ? (
+                  <>
+                    <Loader2 className="size-4 animate-spin mr-1.5" />
+                    {t('connectingWhatsApp', { defaultMessage: 'Connecting WhatsApp…' })}
+                  </>
+                ) : (
+                  <>
+                    <Zap className="size-4 mr-1.5" />
+                    {connectionStatus === 'connected'
+                      ? t('reconnectWithWhatsApp', { defaultMessage: 'Reconnect or Switch Number' })
+                      : t('connectWithWhatsApp', { defaultMessage: 'Connect with WhatsApp' })}
+                  </>
+                )}
+              </Button>
+              {config?.phone_number_id && (
+                <div className="text-xs text-muted-foreground font-mono">
+                  Connected Phone Number ID: {config.phone_number_id}
+                </div>
               )}
-            </div>
-
-
-            <div className="space-y-2">
-              <Label className="text-muted-foreground">
-                {t('twoStepPin')}
-                <span className="ml-1 text-muted-foreground">{t('optional')}</span>
-              </Label>
-              <Input
-                type="text"
-                inputMode="numeric"
-                maxLength={6}
-                placeholder={t('pinPlaceholder')}
-                value={pin}
-                onChange={(e) =>
-                  setPin(e.target.value.replace(/\D/g, '').slice(0, 6))
-                }
-                className="bg-muted border-border text-foreground placeholder:text-muted-foreground tracking-widest"
-              />
-              <p className="text-xs text-muted-foreground leading-relaxed">
-                <span dangerouslySetInnerHTML={{ __html: t('pinHint') }} />
-              </p>
             </div>
           </CardContent>
         </Card>
+
+        {/* Manual Configuration (Advanced / Self-Hosted Fallback) */}
+        <Accordion className="border-border">
+          <AccordionItem value="manual-setup" className="border rounded-lg bg-card px-4">
+            <AccordionTrigger className="text-sm font-semibold text-foreground hover:no-underline py-4">
+              <div className="flex items-center gap-2 text-left">
+                <span>{t('manualSetupTitle', { defaultMessage: 'Manual Configuration (Advanced / Self-Hosted)' })}</span>
+              </div>
+            </AccordionTrigger>
+            <AccordionContent className="pt-2 pb-6 space-y-4">
+              <p className="text-xs text-muted-foreground">
+                {t('manualSetupDesc', {
+                  defaultMessage:
+                    'Manually enter Phone Number ID, WABA ID, and Permanent Access Token if you prefer manual API management.',
+                })}
+              </p>
+
+              <div className="space-y-2">
+                <Label className="text-muted-foreground">{t('phoneNumberId')}</Label>
+                <Input
+                  placeholder={t('phoneNumberIdPlaceholder')}
+                  value={phoneNumberId}
+                  onChange={(e) => setPhoneNumberId(e.target.value)}
+                  className="bg-muted border-border text-foreground placeholder:text-muted-foreground"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <Label className="text-muted-foreground">{t('wabaId')}</Label>
+                <Input
+                  placeholder={t('wabaIdPlaceholder')}
+                  value={wabaId}
+                  onChange={(e) => setWabaId(e.target.value)}
+                  className="bg-muted border-border text-foreground placeholder:text-muted-foreground"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <Label className="text-muted-foreground">{t('accessToken')}</Label>
+                <div className="relative">
+                  <Input
+                    type={showToken ? 'text' : 'password'}
+                    placeholder={t('accessTokenPlaceholder')}
+                    value={accessToken}
+                    onChange={(e) => {
+                      setAccessToken(e.target.value);
+                      setTokenEdited(true);
+                    }}
+                    onFocus={() => {
+                      if (accessToken === MASKED_TOKEN) {
+                        setAccessToken('');
+                        setTokenEdited(true);
+                      }
+                    }}
+                    className="bg-muted border-border text-foreground placeholder:text-muted-foreground pr-10"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowToken(!showToken)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+                  >
+                    {showToken ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                  </button>
+                </div>
+                {config && !tokenEdited && (
+                  <p className="text-xs text-muted-foreground">
+                    {t('tokenHidden')}
+                  </p>
+                )}
+              </div>
+
+              <div className="space-y-2">
+                <Label className="text-muted-foreground">
+                  {t('twoStepPin')}
+                  <span className="ml-1 text-muted-foreground">{t('optional')}</span>
+                </Label>
+                <Input
+                  type="text"
+                  inputMode="numeric"
+                  maxLength={6}
+                  placeholder={t('pinPlaceholder')}
+                  value={pin}
+                  onChange={(e) =>
+                    setPin(e.target.value.replace(/\D/g, '').slice(0, 6))
+                  }
+                  className="bg-muted border-border text-foreground placeholder:text-muted-foreground tracking-widest"
+                />
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  <span dangerouslySetInnerHTML={{ __html: t('pinHint') }} />
+                </p>
+              </div>
+
+              <div className="pt-2">
+                <Button
+                  onClick={handleSave}
+                  disabled={saving || !canEditSettings}
+                  className="bg-primary hover:bg-primary/90 text-primary-foreground"
+                >
+                  {saving ? (
+                    <>
+                      <Loader2 className="size-4 animate-spin" />
+                      {t('saving')}
+                    </>
+                  ) : (
+                    t('saveConfig')
+                  )}
+                </Button>
+              </div>
+            </AccordionContent>
+          </AccordionItem>
+        </Accordion>
 
         {/* Webhook URL */}
         <Card>
@@ -884,20 +1056,6 @@ export function WhatsAppConfig() {
 
         {/* Action Buttons */}
         <div className="flex flex-wrap gap-3">
-          <Button
-            onClick={handleSave}
-            disabled={saving}
-            className="bg-primary hover:bg-primary/90 text-primary-foreground"
-          >
-            {saving ? (
-              <>
-                <Loader2 className="size-4 animate-spin" />
-                {t('saving')}
-              </>
-            ) : (
-              t('saveConfig')
-            )}
-          </Button>
           <Button
             variant="outline"
             onClick={handleTestConnection}

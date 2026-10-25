@@ -145,6 +145,14 @@ describe("verifyTokenMatches", () => {
     expect(verifyTokenMatches("my-verify-token", "")).toBe(false);
   });
 
+  it("accepts tokens with surrounding whitespace or quotes", () => {
+    expect(verifyTokenMatches('"my-verify-token"', "my-verify-token")).toBe(true);
+    expect(verifyTokenMatches("'my-verify-token'", "my-verify-token")).toBe(true);
+    expect(verifyTokenMatches("  my-verify-token  ", "my-verify-token")).toBe(true);
+    expect(verifyTokenMatches("my-verify-token", '  "my-verify-token"  ')).toBe(true);
+    expect(verifyTokenMatches("my-verify-token", "  'my-verify-token'  ")).toBe(true);
+  });
+
   it("does not treat NUL padding as equal", () => {
     expect(verifyTokenMatches("abc", "\0abc")).toBe(false);
     expect(verifyTokenMatches("abc", "abc\0")).toBe(false);

@@ -248,6 +248,88 @@ describe('WhatsApp Webhook GET Verification (Platform-Level)', () => {
     expect(data.error).toBe('Invalid verification mode')
   })
 
+  it('verifies successfully when platform env var has surrounding double quotes', async () => {
+    process.env.WHATSAPP_VERIFY_TOKEN = `"${PLATFORM_TOKEN}"`
+
+    const req = new Request(
+      `https://example.com/api/whatsapp/webhook?hub.mode=subscribe&hub.challenge=quoted_chal_1&hub.verify_token=${PLATFORM_TOKEN}`
+    )
+    const res = await GET(req)
+
+    expect(res.status).toBe(200)
+    expect(await res.text()).toBe('quoted_chal_1')
+  })
+
+  it('verifies successfully when platform env var has surrounding single quotes', async () => {
+    process.env.WHATSAPP_VERIFY_TOKEN = `'${PLATFORM_TOKEN}'`
+
+    const req = new Request(
+      `https://example.com/api/whatsapp/webhook?hub.mode=subscribe&hub.challenge=quoted_chal_2&hub.verify_token=${PLATFORM_TOKEN}`
+    )
+    const res = await GET(req)
+
+    expect(res.status).toBe(200)
+    expect(await res.text()).toBe('quoted_chal_2')
+  })
+
+  it('verifies successfully when incoming query token has surrounding quotes or whitespace', async () => {
+    process.env.WHATSAPP_VERIFY_TOKEN = PLATFORM_TOKEN
+
+    const req = new Request(
+      `https://example.com/api/whatsapp/webhook?hub.mode=subscribe&hub.challenge=whitespace_chal&hub.verify_token=%20%22${PLATFORM_TOKEN}%22%20`
+    )
+    const res = await GET(req)
+
+    expect(res.status).toBe(200)
+    expect(await res.text()).toBe('whitespace_chal')
+  })
+
+  it('verifies successfully with alias fallbacks META_WEBHOOK_VERIFY_TOKEN and WHATSAPP_WEBHOOK_VERIFY_TOKEN', async () => {
+    process.env.WHATSAPP_VERIFY_TOKEN = ''
+    process.env.META_VERIFY_TOKEN = ''
+    process.env.META_WEBHOOK_VERIFY_TOKEN = 'meta_webhook_alias_tok'
+
+    const req1 = new Request(
+      'https://example.com/api/whatsapp/webhook?hub.mode=subscribe&hub.challenge=alias_chal_1&hub.verify_token=meta_webhook_alias_tok'
+    )
+    const res1 = await GET(req1)
+    expect(res1.status).toBe(200)
+    expect(await res1.text()).toBe('alias_chal_1')
+
+    process.env.META_WEBHOOK_VERIFY_TOKEN = ''
+    process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN = 'wa_webhook_alias_tok'
+
+    const req2 = new Request(
+      'https://example.com/api/whatsapp/webhook?hub.mode=subscribe&hub.challenge=alias_chal_2&hub.verify_token=wa_webhook_alias_tok'
+    )
+    const res2 = await GET(req2)
+    expect(res2.status).toBe(200)
+    expect(await res2.text()).toBe('alias_chal_2')
+  })
+
+  it('rejects missing individual verification parameters with HTTP 400', async () => {
+    // Missing hub.mode
+    const resNoMode = await GET(
+      new Request(`https://example.com/api/whatsapp/webhook?hub.challenge=c1&hub.verify_token=${PLATFORM_TOKEN}`)
+    )
+    expect(resNoMode.status).toBe(400)
+    expect((await resNoMode.json()).error).toBe('Missing verification parameters')
+
+    // Missing hub.challenge
+    const resNoChal = await GET(
+      new Request(`https://example.com/api/whatsapp/webhook?hub.mode=subscribe&hub.verify_token=${PLATFORM_TOKEN}`)
+    )
+    expect(resNoChal.status).toBe(400)
+    expect((await resNoChal.json()).error).toBe('Missing verification parameters')
+
+    // Missing hub.verify_token
+    const resNoTok = await GET(
+      new Request('https://example.com/api/whatsapp/webhook?hub.mode=subscribe&hub.challenge=c1')
+    )
+    expect(resNoTok.status).toBe(400)
+    expect((await resNoTok.json()).error).toBe('Missing verification parameters')
+  })
+
   it('supports underscore query parameters (hub_mode, hub_challenge, hub_verify_token)', async () => {
     const req = new Request(
       `https://example.com/api/whatsapp/webhook?hub_mode=subscribe&hub_challenge=underscore_chal&hub_verify_token=${PLATFORM_TOKEN}`
@@ -257,6 +339,7 @@ describe('WhatsApp Webhook GET Verification (Platform-Level)', () => {
     expect(res.status).toBe(200)
     expect(await res.text()).toBe('underscore_chal')
   })
+
 
   it('never leaks platform secrets or incoming tokens in responses', async () => {
     const req = new Request(

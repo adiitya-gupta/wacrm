@@ -26,7 +26,11 @@ export interface MetaPhoneInfo {
   display_phone_number: string
   verified_name?: string
   quality_rating?: string
+  status?: string
+  code_verification_status?: string
+  name_status?: string
 }
+
 
 interface MetaErrorResponse {
   error?: {
@@ -126,7 +130,7 @@ export async function verifyPhoneNumber(
   args: VerifyPhoneNumberArgs
 ): Promise<MetaPhoneInfo> {
   const { phoneNumberId, accessToken } = args
-  const url = `${META_API_BASE}/${phoneNumberId}?fields=id,display_phone_number,verified_name,quality_rating`
+  const url = `${META_API_BASE}/${phoneNumberId}?fields=id,display_phone_number,verified_name,quality_rating,status,code_verification_status,name_status`
   const response = await fetch(url, {
     headers: { Authorization: `Bearer ${accessToken}` },
   })
@@ -165,12 +169,11 @@ export interface RegisterPhoneNumberArgs {
   phoneNumberId: string
   accessToken: string
   /**
-   * 6-digit PIN the user set in Meta WhatsApp Manager →
-   * Two-step verification. If 2FA is not enabled on the number,
-   * Meta rejects /register with a clear error and the user is
-   * pointed at the right setting in the UI.
+   * 6-digit PIN. If set in Meta WhatsApp Manager → Two-step verification,
+   * pass it here. Optional for accounts where Meta's PIN-less registration
+   * rollout applies.
    */
-  pin: string
+  pin?: string | null
 }
 
 export interface RegisterPhoneNumberResult {
@@ -196,13 +199,17 @@ export async function registerPhoneNumber(
 ): Promise<RegisterPhoneNumberResult> {
   const { phoneNumberId, accessToken, pin } = args
   const url = `${META_API_BASE}/${phoneNumberId}/register`
+  const bodyPayload: Record<string, string> = { messaging_product: 'whatsapp' }
+  if (typeof pin === 'string' && pin.trim().length > 0) {
+    bodyPayload.pin = pin.trim()
+  }
   const response = await fetch(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${accessToken}`,
     },
-    body: JSON.stringify({ messaging_product: 'whatsapp', pin }),
+    body: JSON.stringify(bodyPayload),
   })
 
   if (response.ok) {
@@ -214,7 +221,7 @@ export async function registerPhoneNumber(
   // subscribed to this app — that's success from the caller's
   // perspective, surface it as such.
   const error = await readMetaError(response, `Meta API error: ${response.status}`)
-  if (/already.*registered/i.test(error.message)) {
+  if (/already.*registered/i.test(error.message) || (error.code === 133005 && !/pin|wrong|invalid/i.test(error.message))) {
     return { success: true, alreadyRegistered: true }
   }
   throw error
@@ -319,6 +326,160 @@ export async function getSubscribedApps(
   }
   const data = (await response.json()) as { data?: SubscribedApp[] }
   return data.data ?? []
+}
+
+// ============================================================
+// OAuth & WhatsApp Embedded Signup
+// ============================================================
+
+export interface ExchangeOAuthCodeArgs {
+  code: string
+  appId: string
+  appSecret: string
+}
+
+export interface MetaTokenResponse {
+  accessToken: string
+  tokenType: string
+  expiresIn?: number
+}
+
+/**
+ * Exchange an Embedded Signup authorization code for an access token.
+ */
+export async function exchangeOAuthCode(
+  args: ExchangeOAuthCodeArgs
+): Promise<MetaTokenResponse> {
+  const { code, appId, appSecret } = args
+  const url = new URL(`${META_API_BASE}/oauth/access_token`)
+  url.searchParams.set('client_id', appId)
+  url.searchParams.set('client_secret', appSecret)
+  url.searchParams.set('code', code)
+
+  const response = await fetch(url.toString(), {
+    method: 'GET',
+    headers: { Accept: 'application/json' },
+  })
+
+  if (!response.ok) {
+    await throwMetaError(response, `Meta OAuth token exchange failed: ${response.status}`)
+  }
+
+  const data = (await response.json()) as {
+    access_token: string
+    token_type?: string
+    expires_in?: number
+  }
+
+  return {
+    accessToken: data.access_token,
+    tokenType: data.token_type || 'bearer',
+    expiresIn: data.expires_in,
+  }
+}
+
+export interface ExchangeForLongLivedTokenArgs {
+  shortLivedToken: string
+  appId: string
+  appSecret: string
+}
+
+/**
+ * Exchange a short-lived user access token for a 60-day long-lived token.
+ */
+export async function exchangeForLongLivedToken(
+  args: ExchangeForLongLivedTokenArgs
+): Promise<MetaTokenResponse> {
+  const { shortLivedToken, appId, appSecret } = args
+  const url = new URL(`${META_API_BASE}/oauth/access_token`)
+  url.searchParams.set('grant_type', 'fb_exchange_token')
+  url.searchParams.set('client_id', appId)
+  url.searchParams.set('client_secret', appSecret)
+  url.searchParams.set('fb_exchange_token', shortLivedToken)
+
+  const response = await fetch(url.toString(), {
+    method: 'GET',
+    headers: { Accept: 'application/json' },
+  })
+
+  if (!response.ok) {
+    await throwMetaError(response, `Meta long-lived token exchange failed: ${response.status}`)
+  }
+
+  const data = (await response.json()) as {
+    access_token: string
+    token_type?: string
+    expires_in?: number
+  }
+
+  return {
+    accessToken: data.access_token,
+    tokenType: data.token_type || 'bearer',
+    expiresIn: data.expires_in,
+  }
+}
+
+export interface DebugTokenArgs {
+  inputToken: string
+  appId: string
+  appSecret: string
+}
+
+export interface MetaDebugTokenData {
+  appId?: string
+  isValid: boolean
+  expiresAt?: number
+  scopes: string[]
+  granularScopes?: Array<{ scope: string; targetIds?: string[] }>
+  userId?: string
+  error?: { code: number; message: string }
+}
+
+/**
+ * Inspect and debug an access token using Meta's debug_token endpoint.
+ */
+export async function debugToken(
+  args: DebugTokenArgs
+): Promise<MetaDebugTokenData> {
+  const { inputToken, appId, appSecret } = args
+  const url = new URL(`${META_API_BASE}/debug_token`)
+  url.searchParams.set('input_token', inputToken)
+  url.searchParams.set('access_token', `${appId}|${appSecret}`)
+
+  const response = await fetch(url.toString(), {
+    method: 'GET',
+    headers: { Accept: 'application/json' },
+  })
+
+  if (!response.ok) {
+    await throwMetaError(response, `Meta debug_token failed: ${response.status}`)
+  }
+
+  const json = (await response.json()) as {
+    data?: {
+      app_id?: string
+      is_valid?: boolean
+      expires_at?: number
+      scopes?: string[]
+      granular_scopes?: Array<{ scope: string; target_ids?: string[] }>
+      user_id?: string
+      error?: { code: number; message: string }
+    }
+  }
+
+  const data = json.data || {}
+  return {
+    appId: data.app_id,
+    isValid: Boolean(data.is_valid),
+    expiresAt: data.expires_at,
+    scopes: data.scopes || [],
+    granularScopes: (data.granular_scopes || []).map((gs) => ({
+      scope: gs.scope,
+      targetIds: gs.target_ids,
+    })),
+    userId: data.user_id,
+    error: data.error,
+  }
 }
 
 // ============================================================

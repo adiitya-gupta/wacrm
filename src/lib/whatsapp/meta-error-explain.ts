@@ -229,6 +229,14 @@ export function explainMetaError(
   }
 
   // --- Registration / PIN --------------------------------------------------
+  if (code === 133007) {
+    return build(
+      'A two-step verification PIN is required to register this phone number. Set a 6-digit PIN in ' +
+        'WhatsApp Manager → Phone numbers → Two-step verification, then enter it below and save.',
+      'pin',
+      'user',
+    )
+  }
   if (code === 133010) {
     return build(
       'This phone number is not registered with the WhatsApp Cloud API yet. Enter the two-step ' +

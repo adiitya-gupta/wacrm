@@ -13,7 +13,7 @@ const STORED_CONFIG = {
   waba_id: '444555666',
   access_token: 'enc-token',
   status: 'connected',
-  registered_at: '2026-01-01T00:00:00.000Z',
+  registered_at: '2026-01-01T00:00:00.000Z' as string | null,
   verify_token: null,
 }
 
@@ -99,9 +99,21 @@ vi.mock('@/lib/whatsapp/encryption', () => ({
 }))
 
 const meta = vi.hoisted(() => ({
-  verifyPhoneNumber: vi.fn(async () => ({ id: '111222333', verified_name: 'Acme Support' })),
+  verifyPhoneNumber: vi.fn(
+    async (): Promise<{
+      id: string
+      display_phone_number?: string
+      verified_name?: string
+      quality_rating?: string
+      status?: string
+      code_verification_status?: string
+      name_status?: string
+    }> => ({ id: '111222333', verified_name: 'Acme Support' }),
+  ),
   listWabaPhoneNumbers: vi.fn(async () => [{ id: '111222333' }]),
-  registerPhoneNumber: vi.fn(async () => ({ success: true })),
+  registerPhoneNumber: vi.fn(
+    async (): Promise<{ success: boolean; alreadyRegistered?: boolean }> => ({ success: true }),
+  ),
   subscribeWabaToApp: vi.fn(async () => ({ success: true })),
   getSubscribedApps: vi.fn(async () => []),
 }))
@@ -274,6 +286,104 @@ describe('POST /api/whatsapp/config', () => {
       (process.env as Record<string, string | undefined>).NODE_ENV = originalEnv
     }
   })
+
+  it('registers successfully without PIN when Meta verifyPhoneNumber reports status CONNECTED', async () => {
+    meta.verifyPhoneNumber.mockResolvedValueOnce({
+      id: '111222333',
+      verified_name: 'Acme Support',
+      status: 'CONNECTED',
+    })
+
+    const res = await saveConfig({ pin: undefined })
+    const body = await res.json()
+
+    expect(res.status).toBe(200)
+    expect(body).toMatchObject({ success: true, saved: true, registered: true })
+    expect(configInserts).toHaveLength(1)
+    expect(configInserts[0].registered_at).toBeDefined()
+    expect(configInserts[0].registered_at).not.toBeNull()
+    expect(configInserts[0].last_registration_error).toBeNull()
+  })
+
+  it('registers successfully via PIN-less registration when Meta status is not CONNECTED and register succeeds', async () => {
+    meta.verifyPhoneNumber.mockResolvedValueOnce({
+      id: '111222333',
+      verified_name: 'Acme Support',
+      status: 'PENDING',
+    })
+    meta.registerPhoneNumber.mockResolvedValueOnce({ success: true, alreadyRegistered: false })
+
+    const res = await saveConfig({ pin: undefined })
+    const body = await res.json()
+
+    expect(res.status).toBe(200)
+    expect(body).toMatchObject({ success: true, saved: true, registered: true })
+    expect(meta.registerPhoneNumber).toHaveBeenCalledWith({
+      phoneNumberId: '111222333',
+      accessToken: 'caller-supplied-token',
+    })
+    expect(configInserts[0].registered_at).toBeDefined()
+    expect(configInserts[0].registered_at).not.toBeNull()
+  })
+
+  it('fails registration and does not set registered_at when PIN-less registration fails because PIN is required', async () => {
+    meta.verifyPhoneNumber.mockResolvedValueOnce({
+      id: '111222333',
+      verified_name: 'Acme Support',
+      status: 'PENDING',
+    })
+    meta.registerPhoneNumber.mockRejectedValueOnce({
+      name: 'MetaApiError',
+      message: 'Two-step verification PIN required.',
+      code: 133007,
+    })
+
+    const res = await saveConfig({ pin: undefined })
+    const body = await res.json()
+
+    expect(res.status).toBe(200)
+    expect(body).toMatchObject({ success: false, saved: true, registered: false })
+    expect(body.registration_error).toMatch(/two-step verification PIN/i)
+    expect(configInserts[0].registered_at).toBeNull()
+    expect(configInserts[0].last_registration_error).toMatch(/two-step verification PIN/i)
+  })
+
+  it('fails registration and does not set registered_at when user supplies wrong PIN', async () => {
+    meta.registerPhoneNumber.mockRejectedValueOnce({
+      name: 'MetaApiError',
+      message: 'The two-step verification PIN is wrong.',
+      code: 136025,
+    })
+
+    const res = await saveConfig({ pin: '000000' })
+    const body = await res.json()
+
+    expect(res.status).toBe(200)
+    expect(body).toMatchObject({ success: false, saved: true, registered: false })
+    expect(configInserts[0].registered_at).toBeNull()
+    expect(configInserts[0].last_registration_error).toContain('PIN is wrong')
+  })
+
+  it('clears registered_at when number is re-saved but Meta reports DISCONNECTED and PIN-less register fails', async () => {
+    storedConfig = STORED_CONFIG
+    meta.verifyPhoneNumber.mockResolvedValueOnce({
+      id: '111222333',
+      verified_name: 'Acme Support',
+      status: 'DISCONNECTED',
+    })
+    meta.registerPhoneNumber.mockRejectedValueOnce({
+      name: 'MetaApiError',
+      message: 'Rate limit or registration error',
+      code: 133010,
+    })
+
+    const res = await saveConfig({ pin: undefined })
+    const body = await res.json()
+
+    expect(res.status).toBe(200)
+    expect(body.registered).toBe(false)
+    expect(configUpdates[0].registered_at).toBeNull()
+  })
 })
 
 describe('DELETE /api/whatsapp/config', () => {
@@ -310,5 +420,24 @@ describe('GET /api/whatsapp/config', () => {
     expect(body.connected).toBe(true)
     expect(JSON.stringify(body)).not.toContain('plaintext-token')
     expect(JSON.stringify(body)).not.toContain('enc-token')
+  })
+
+  it('auto-synchronizes registered_at when Meta reports status CONNECTED and local registered_at is null', async () => {
+    callerRole = 'admin'
+    storedConfig = { ...STORED_CONFIG, registered_at: null }
+    meta.verifyPhoneNumber.mockResolvedValueOnce({
+      id: '111222333',
+      verified_name: 'Acme Support',
+      status: 'CONNECTED',
+    })
+
+    const res = await GET()
+    const body = await res.json()
+
+    expect(res.status).toBe(200)
+    expect(body.connected).toBe(true)
+    expect(configUpdates).toHaveLength(1)
+    expect(configUpdates[0].registered_at).toBeDefined()
+    expect(configUpdates[0].registered_at).not.toBeNull()
   })
 })

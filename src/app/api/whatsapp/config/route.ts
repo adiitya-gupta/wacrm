@@ -133,7 +133,7 @@ export async function GET() {
 
     const { data: config, error: configError } = await supabase
       .from('whatsapp_config')
-      .select('phone_number_id, waba_id, access_token, status')
+      .select('phone_number_id, waba_id, access_token, status, registered_at')
       .eq('account_id', accountId)
       .maybeSingle()
 
@@ -197,6 +197,19 @@ export async function GET() {
         },
         { status: 200 }
       )
+    }
+
+    // If Meta authoritatively confirms the phone number is CONNECTED and registered
+    // on the Cloud API, synchronize registered_at in DB if it was previously null.
+    if (phoneInfo?.status === 'CONNECTED' && !config.registered_at) {
+      const now = new Date().toISOString()
+      const { error: syncError } = await supabase
+        .from('whatsapp_config')
+        .update({ registered_at: now, status: 'connected', last_registration_error: null })
+        .eq('account_id', accountId)
+      if (!syncError) {
+        config.registered_at = now
+      }
     }
 
     // Credentials work. Also report whether the WABA is subscribed to
@@ -433,39 +446,63 @@ export async function POST(request: Request) {
     // True when registration was deliberately skipped because no PIN
     // was supplied (see below). Distinct from registrationError — this
     // is not a failure, just an incomplete-but-valid save.
-    let registrationSkipped = false
+    const registrationSkipped = false
 
-    const needsRegistration = !sameNumber || (typeof pin === 'string' && pin.length > 0)
+    const hasPin = typeof pin === 'string' && pin.trim().length > 0
+    const isMetaConnected = phoneInfo?.status === 'CONNECTED'
+    const needsRegistration = !sameNumber || hasPin || !existing?.registered_at
+
     if (needsRegistration) {
-      if (!pin) {
-        // No PIN provided. Meta TEST numbers (Developer Console) are
-        // pre-registered by Meta and expose no two-step verification
-        // PIN to set, so requiring one made them impossible to connect
-        // (issue #242). The /register + PIN step only matters for
-        // production numbers under a shared WABA (issue #136), so treat
-        // it as best-effort: skip it, save the (already Meta-verified)
-        // credentials as connected, and leave registered_at null. The
-        // UI surfaces a separate "Not registered" banner with a path to
-        // add a PIN later for users who do need inbound webhook routing.
-        registrationSkipped = true
-      } else {
+      if (hasPin) {
         try {
           await registerPhoneNumber({
             phoneNumberId: phone_number_id,
             accessToken: access_token,
-            pin,
+            pin: pin.trim(),
           })
           registeredAt = new Date().toISOString()
         } catch (err) {
           const explained = explainMetaError(err, 'register', metaCtx)
           registrationError = explained.summary
           registrationMeta = metaErrorPayload(explained)
-          console.error('Phone number /register failed:', explained.metaMessage, registrationMeta)
-          // We deliberately fall through and still save the row so the
-          // user can retry without re-entering everything. The UI
-          // surfaces `last_registration_error` so they see WHY it's
-          // not actually live yet.
+          registeredAt = null
+          console.error('Phone number /register with PIN failed:', explained.metaMessage, registrationMeta)
         }
+      } else if (isMetaConnected) {
+        // Meta authoritatively confirms the phone number is active and connected on the Cloud API.
+        // For accounts where Meta rolled out the new account model, 2FA PIN is deprecated.
+        registeredAt = existing?.registered_at ?? new Date().toISOString()
+      } else {
+        // No PIN provided and not yet confirmed CONNECTED on Meta.
+        // Attempt Meta's modern PIN-less registration.
+        try {
+          await registerPhoneNumber({
+            phoneNumberId: phone_number_id,
+            accessToken: access_token,
+          })
+          registeredAt = new Date().toISOString()
+        } catch (err) {
+          const explained = explainMetaError(err, 'register', metaCtx)
+          registrationError = explained.summary
+          registrationMeta = metaErrorPayload(explained)
+          registeredAt = null
+          console.error('Phone number PIN-less /register failed:', explained.metaMessage, registrationMeta)
+        }
+      }
+    } else if (phoneInfo?.status && phoneInfo.status !== 'CONNECTED') {
+      // Local DB had registered_at, but Meta reports the number is no longer connected.
+      // We must not trust the local DB flag alone!
+      try {
+        await registerPhoneNumber({
+          phoneNumberId: phone_number_id,
+          accessToken: access_token,
+        })
+        registeredAt = new Date().toISOString()
+      } catch (err) {
+        const explained = explainMetaError(err, 'register', metaCtx)
+        registrationError = explained.summary
+        registrationMeta = metaErrorPayload(explained)
+        registeredAt = null
       }
     }
 

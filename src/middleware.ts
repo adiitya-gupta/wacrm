@@ -42,6 +42,20 @@ export async function middleware(request: NextRequest) {
     return response
   }
 
+  // Auth fallback query parameters landed on root URL (e.g. Supabase default Site URL fallback).
+  // Forward to /auth/callback so they are handled and exchanged rather than lost on the marketing page.
+  if (
+    request.nextUrl.pathname === '/' &&
+    (request.nextUrl.searchParams.has('error') ||
+      request.nextUrl.searchParams.has('error_code') ||
+      request.nextUrl.searchParams.has('code') ||
+      request.nextUrl.searchParams.has('token_hash'))
+  ) {
+    const url = request.nextUrl.clone()
+    url.pathname = '/auth/callback'
+    return withRefreshedCookies(NextResponse.redirect(url))
+  }
+
   // Auth pages - redirect to dashboard if already logged in.
   // Exception: when an invite token is in the query string we
   // send the already-signed-in user to /join/<token> instead so

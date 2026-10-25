@@ -4,6 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { useTranslations } from "next-intl";
 import { createClient } from "@/lib/supabase/client";
+import { getAuthRedirectBaseUrl } from "@/lib/auth/url";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -36,8 +37,10 @@ export default function ForgotPasswordPage() {
       // #592). Supabase must allow this origin under Authentication →
       // URL Configuration → Redirect URLs, or it silently falls back to
       // its Site URL; see docs/auth-emails.md.
+      const baseUrl = getAuthRedirectBaseUrl();
+      const redirectTo = `${baseUrl}/auth/callback?next=${encodeURIComponent("/reset-password")}`;
       const { error } = await supabase.auth.resetPasswordForEmail(email, {
-        redirectTo: `${window.location.origin}/auth/callback?next=${encodeURIComponent("/reset-password")}`,
+        redirectTo,
       });
 
       if (error) {

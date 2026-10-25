@@ -6,10 +6,17 @@ const mocks = vi.hoisted(() => ({
   createClient: vi.fn(),
   getUser: vi.fn(),
   updateUser: vi.fn(),
+  searchParamsGet: vi.fn(),
 }));
 
 vi.mock('next-intl', () => ({
   useTranslations: () => (key: string) => key,
+}));
+
+vi.mock('next/navigation', () => ({
+  useSearchParams: () => ({
+    get: mocks.searchParamsGet,
+  }),
 }));
 
 vi.mock('@/lib/supabase/client', () => ({
@@ -57,5 +64,18 @@ describe('ResetPasswordPage prerendering and client lifecycle', () => {
     }).not.toThrow();
 
     expect(mocks.createClient).not.toHaveBeenCalled();
+  });
+
+  it('renders expired state immediately when query error or error_code is present', () => {
+    mocks.searchParamsGet.mockImplementation((param: string) => {
+      if (param === 'error_code') return 'otp_expired';
+      if (param === 'error_description') return 'Email link is invalid or has expired';
+      return null;
+    });
+
+    const html = renderToString(<ResetPasswordPage />);
+    expect(html).toContain('expiredTitle');
+    expect(html).toContain('Email link is invalid or has expired');
+    expect(html).toContain('requestNewLink');
   });
 });

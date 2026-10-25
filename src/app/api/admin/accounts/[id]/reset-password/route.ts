@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { requirePlatformAdmin } from '@/lib/admin/auth';
 import { toErrorResponse } from '@/lib/auth/account';
+import { getAuthRedirectBaseUrl } from '@/lib/auth/url';
 import { supabaseAdmin } from '@/lib/flows/admin-client';
 
 export async function POST(
@@ -69,8 +70,8 @@ export async function POST(
     }
 
     // 3. Generate secure password reset recovery link using server-side Supabase Admin API
-    const origin = new URL(request.url).origin;
-    const redirectTo = `${origin}/auth/callback?next=${encodeURIComponent('/reset-password')}`;
+    const baseUrl = getAuthRedirectBaseUrl({ request });
+    const redirectTo = `${baseUrl}/auth/callback?next=${encodeURIComponent('/reset-password')}`;
 
     const { data: linkData, error: linkErr } = await db.auth.admin.generateLink({
       type: 'recovery',

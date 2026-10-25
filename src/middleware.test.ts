@@ -138,3 +138,39 @@ describe("middleware — every dashboard route requires a session", () => {
     expect(new URL(res.headers.get("location")!).pathname).toBe("/login");
   });
 });
+
+describe("middleware — root URL auth parameter forwarding", () => {
+  it("forwards error and error_code on root / to /auth/callback", async () => {
+    mockUser = null;
+    const res = await middleware(
+      new NextRequest(
+        "https://app.test/?error=access_denied&error_code=otp_expired&error_description=Email+link+is+invalid+or+has+expired",
+      ),
+    );
+
+    expect(res.status).toBe(307);
+    const location = res.headers.get("location")!;
+    const parsed = new URL(location);
+    expect(parsed.pathname).toBe("/auth/callback");
+    expect(parsed.searchParams.get("error")).toBe("access_denied");
+    expect(parsed.searchParams.get("error_code")).toBe("otp_expired");
+  });
+
+  it("forwards PKCE code on root / to /auth/callback", async () => {
+    mockUser = null;
+    const res = await middleware(
+      new NextRequest("https://app.test/?code=pkce_abc_123"),
+    );
+
+    expect(res.status).toBe(307);
+    const parsed = new URL(res.headers.get("location")!);
+    expect(parsed.pathname).toBe("/auth/callback");
+    expect(parsed.searchParams.get("code")).toBe("pkce_abc_123");
+  });
+
+  it("leaves standard root page visits untouched without redirect", async () => {
+    mockUser = null;
+    const res = await middleware(new NextRequest("https://app.test/"));
+    expect(res.headers.get("location")).toBeNull();
+  });
+});

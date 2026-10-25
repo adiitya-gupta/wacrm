@@ -31,7 +31,7 @@
 
 import { createClient } from '@/lib/supabase/server';
 import {
-  loginFailurePath,
+  authFailurePath,
   parseEmailLink,
   parseSupabaseError,
   relativeRedirect,
@@ -43,16 +43,20 @@ export const dynamic = 'force-dynamic';
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
-  const next = safeNextPath(searchParams.get('next'));
+  const rawNext = searchParams.get('next');
+  const isRecovery =
+    rawNext === '/reset-password' || searchParams.get('type') === 'recovery';
+  const next = isRecovery && !rawNext ? '/reset-password' : safeNextPath(rawNext);
+  const failureTarget = isRecovery ? '/reset-password' : next;
 
   const upstreamError = parseSupabaseError(searchParams);
   if (upstreamError) {
-    return relativeRedirect(loginFailurePath(upstreamError));
+    return relativeRedirect(authFailurePath(upstreamError, failureTarget));
   }
 
   const link = parseEmailLink(searchParams);
   if (!link) {
-    return relativeRedirect(loginFailurePath('link_invalid'));
+    return relativeRedirect(authFailurePath('link_invalid', failureTarget));
   }
 
   const supabase = await createClient();
@@ -67,13 +71,12 @@ export async function GET(request: Request) {
   if (error) {
     // Most common cause in practice: the PKCE code verifier cookie is
     // missing because the link was opened in a different browser than
-    // the one that requested it. The email itself was still verified
-    // by Supabase, so /login's message tells the user to just sign in.
+    // the one that requested it.
     console.warn('[GET /auth/callback] session exchange failed:', {
       kind: link.kind,
       message: error.message,
     });
-    return relativeRedirect(loginFailurePath('link_invalid'));
+    return relativeRedirect(authFailurePath('link_invalid', failureTarget));
   }
 
   return relativeRedirect(next);

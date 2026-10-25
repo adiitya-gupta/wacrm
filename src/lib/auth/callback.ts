@@ -121,6 +121,22 @@ export function loginFailurePath(reason: CallbackFailure): string {
 }
 
 /**
+ * Determine where a failed auth callback should land.
+ * When the visitor was attempting password recovery (next=/reset-password),
+ * send them to the password reset page with a recovery-specific error so they
+ * can request a new reset link rather than seeing a confusing login message.
+ */
+export function authFailurePath(
+  reason: CallbackFailure,
+  next?: string | null,
+): string {
+  if (next === '/reset-password') {
+    return `/reset-password?error=${reason === 'link_expired' ? 'expired' : 'invalid'}`;
+  }
+  return loginFailurePath(reason);
+}
+
+/**
  * A redirect whose `Location` is a *relative* path.
  *
  * `NextResponse.redirect()` insists on an absolute URL, and building

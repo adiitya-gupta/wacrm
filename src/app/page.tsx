@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import {
   MessageSquare,
@@ -30,6 +30,24 @@ import { Card, CardContent } from "@/components/ui/card";
 export default function HomePage() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [activePreviewTab, setActivePreviewTab] = useState<"inbox" | "pipeline" | "flows">("inbox");
+
+  // Handle client-side hash redirects from Supabase Auth fallbacks
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.location.hash) return;
+    const hash = window.location.hash;
+    if (hash.includes("error=") || hash.includes("error_code=")) {
+      if (hash.includes("type=recovery") || hash.includes("reset")) {
+        // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- deliberate full navigation to transfer auth hash
+        window.location.href = `/reset-password${window.location.search}${hash}`;
+      } else {
+        // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- deliberate full navigation to transfer auth hash
+        window.location.href = `/login${window.location.search}${hash}`;
+      }
+    } else if (hash.includes("type=recovery") && hash.includes("access_token=")) {
+      // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- deliberate full navigation to transfer auth hash
+      window.location.href = `/reset-password${window.location.search}${hash}`;
+    }
+  }, []);
 
   return (
     <div className="min-h-screen bg-background text-foreground selection:bg-primary/20 selection:text-primary">

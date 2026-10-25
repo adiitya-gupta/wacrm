@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  authFailurePath,
   DEFAULT_NEXT_PATH,
   isEmailOtpType,
   loginFailurePath,
@@ -141,6 +142,32 @@ describe('loginFailurePath', () => {
   it('points at /login with the reason the page can explain', () => {
     expect(loginFailurePath('link_expired')).toBe('/login?error=link_expired');
     expect(loginFailurePath('link_invalid')).toBe('/login?error=link_invalid');
+  });
+});
+
+describe('authFailurePath', () => {
+  it('redirects to /reset-password?error=expired when recovery link has expired', () => {
+    expect(authFailurePath('link_expired', '/reset-password')).toBe(
+      '/reset-password?error=expired',
+    );
+  });
+
+  it('redirects to /reset-password?error=invalid when recovery link is invalid', () => {
+    expect(authFailurePath('link_invalid', '/reset-password')).toBe(
+      '/reset-password?error=invalid',
+    );
+  });
+
+  it('falls back to loginFailurePath for non-recovery flows', () => {
+    expect(authFailurePath('link_expired', '/dashboard')).toBe(
+      '/login?error=link_expired',
+    );
+    expect(authFailurePath('link_invalid', '/dashboard')).toBe(
+      '/login?error=link_invalid',
+    );
+    expect(authFailurePath('link_invalid', null)).toBe(
+      '/login?error=link_invalid',
+    );
   });
 });
 

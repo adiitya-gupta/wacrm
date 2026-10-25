@@ -68,7 +68,7 @@ describe('GET /auth/callback', () => {
     }
   });
 
-  it('sends a failed exchange to /login with a reason, not a 404 or a raw error', async () => {
+  it('sends a failed recovery exchange to /reset-password with invalid reason', async () => {
     mocks.exchangeCodeForSession.mockResolvedValue({
       error: { message: 'PKCE code verifier not found' },
     });
@@ -76,8 +76,43 @@ describe('GET /auth/callback', () => {
     const res = await GET(request('code=stale&next=%2Freset-password'));
 
     expect(res.status).toBe(303);
+    expect(res.headers.get('location')).toBe('/reset-password?error=invalid');
+    expect(console.warn).toHaveBeenCalled();
+  });
+
+  it('sends a failed non-recovery exchange to /login', async () => {
+    mocks.exchangeCodeForSession.mockResolvedValue({
+      error: { message: 'PKCE code verifier not found' },
+    });
+
+    const res = await GET(request('code=stale&next=%2Fdashboard'));
+
+    expect(res.status).toBe(303);
     expect(res.headers.get('location')).toBe('/login?error=link_invalid');
     expect(console.warn).toHaveBeenCalled();
+  });
+
+  it('reports an expired recovery link to /reset-password?error=expired', async () => {
+    const res = await GET(
+      request(
+        'error=access_denied&error_code=otp_expired&error_description=Email+link+is+invalid+or+has+expired&next=%2Freset-password',
+      ),
+    );
+
+    expect(mocks.createClient).not.toHaveBeenCalled();
+    expect(res.headers.get('location')).toBe('/reset-password?error=expired');
+  });
+
+  it('defaults recovery link with type=recovery to /reset-password on success', async () => {
+    const res = await GET(
+      request('token_hash=th-recovery&type=recovery'),
+    );
+
+    expect(mocks.verifyOtp).toHaveBeenCalledWith({
+      type: 'recovery',
+      token_hash: 'th-recovery',
+    });
+    expect(res.headers.get('location')).toBe('/reset-password');
   });
 
   it('reports a link Supabase already rejected as expired, without touching the client', async () => {

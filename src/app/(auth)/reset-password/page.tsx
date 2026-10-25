@@ -15,7 +15,8 @@
 // away from the very page they need.
 // ============================================================
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useTranslations } from "next-intl";
 import { createClient } from "@/lib/supabase/client";
@@ -34,18 +35,68 @@ import { CheckCircle, KeyRound, Loader2, MailX } from "lucide-react";
 type Status = "checking" | "ready" | "expired" | "done";
 
 export default function ResetPasswordPage() {
-  const t = useTranslations("ResetPasswordPage");
+  return (
+    <Suspense
+      fallback={
+        <div className="flex min-h-screen items-center justify-center bg-background px-4">
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" />
+          </div>
+        </div>
+      }
+    >
+      <ResetPasswordPageInner />
+    </Suspense>
+  );
+}
 
-  const [status, setStatus] = useState<Status>("checking");
+function ResetPasswordPageInner() {
+  const t = useTranslations("ResetPasswordPage");
+  const searchParams = useSearchParams();
+
+  const queryError = searchParams.get("error");
+  const queryErrorCode = searchParams.get("error_code");
+  const queryErrorDesc = searchParams.get("error_description");
+
+  const hasInitialError =
+    queryError === "expired" ||
+    queryError === "invalid" ||
+    queryErrorCode === "otp_expired" ||
+    queryError === "access_denied";
+
+  const [status, setStatus] = useState<Status>(
+    hasInitialError ? "expired" : "checking",
+  );
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(
+    hasInitialError ? queryErrorDesc || null : null,
+  );
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
 
+    if (hasInitialError) {
+      return;
+    }
+
     const checkSession = async () => {
+      // Check for hash errors (e.g. #error=access_denied&error_code=otp_expired)
+      if (typeof window !== "undefined" && window.location.hash) {
+        const hash = window.location.hash;
+        if (hash.includes("otp_expired") || hash.includes("error=access_denied")) {
+          if (!cancelled) {
+            setStatus("expired");
+            const match = hash.match(/error_description=([^&]+)/);
+            if (match) {
+              setError(decodeURIComponent(match[1].replace(/\+/g, " ")));
+            }
+          }
+          return;
+        }
+      }
+
       try {
         const supabase = createClient();
         const {
@@ -77,7 +128,7 @@ export default function ResetPasswordPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [hasInitialError]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

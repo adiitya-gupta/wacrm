@@ -86,28 +86,35 @@ describe("checkRateLimit — distributed Upstash Redis & fail-safe security", ()
     expect(res.limit).toBe(3);
   });
 
-  it("fails safely (closed) in production when Redis is unconfigured or fails (never unlimited)", async () => {
+  it("enforces local memory rate limiting in production when Redis is unconfigured (never unlimited)", async () => {
     const originalEnv = process.env.NODE_ENV;
     try {
-      // Simulate production runtime
       (process.env as Record<string, string | undefined>).NODE_ENV = "production";
       delete process.env.UPSTASH_REDIS_REST_URL;
       delete process.env.UPSTASH_REDIS_REST_TOKEN;
       delete process.env.KV_REST_API_URL;
       delete process.env.KV_REST_API_TOKEN;
 
-      const res = await checkRateLimit("api-key:prod-caller", OPTS);
+      // First request succeeds with remaining decremented
+      const res1 = await checkRateLimit("api-key:prod-caller", OPTS);
+      expect(res1.success).toBe(true);
+      expect(res1.remaining).toBe(2);
+      expect(res1.limit).toBe(3);
 
-      // Must fail closed: success false, remaining 0
-      expect(res.success).toBe(false);
-      expect(res.remaining).toBe(0);
-      expect(res.limit).toBe(3);
+      // Subsequent requests within limit succeed
+      expect((await checkRateLimit("api-key:prod-caller", OPTS)).success).toBe(true);
+      expect((await checkRateLimit("api-key:prod-caller", OPTS)).success).toBe(true);
+
+      // Exceeding limit is rejected (abuse protection active, never unlimited)
+      const over = await checkRateLimit("api-key:prod-caller", OPTS);
+      expect(over.success).toBe(false);
+      expect(over.remaining).toBe(0);
     } finally {
       (process.env as Record<string, string | undefined>).NODE_ENV = originalEnv;
     }
   });
 
-  it("fails safely in production when Redis network error occurs", async () => {
+  it("enforces local memory rate limiting in production when Redis network error occurs (never unlimited)", async () => {
     const originalEnv = process.env.NODE_ENV;
     const originalFetch = global.fetch;
     try {
@@ -118,11 +125,18 @@ describe("checkRateLimit — distributed Upstash Redis & fail-safe security", ()
       // Mock fetch to simulate Redis timeout/network error
       global.fetch = vi.fn().mockRejectedValue(new Error("Connection refused"));
 
-      const res = await checkRateLimit("api-key:network-down", OPTS);
+      // Fallback enforces local rate limits rather than falsely failing closed or staying unlimited
+      const res1 = await checkRateLimit("api-key:network-down", OPTS);
+      expect(res1.success).toBe(true);
+      expect(res1.remaining).toBe(2);
 
-      // Fail-safe: must not allow unlimited mode
-      expect(res.success).toBe(false);
-      expect(res.remaining).toBe(0);
+      expect((await checkRateLimit("api-key:network-down", OPTS)).success).toBe(true);
+      expect((await checkRateLimit("api-key:network-down", OPTS)).success).toBe(true);
+
+      // Request exceeding limit is still throttled
+      const over = await checkRateLimit("api-key:network-down", OPTS);
+      expect(over.success).toBe(false);
+      expect(over.remaining).toBe(0);
     } finally {
       (process.env as Record<string, string | undefined>).NODE_ENV = originalEnv;
       global.fetch = originalFetch;

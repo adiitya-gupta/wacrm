@@ -1,7 +1,7 @@
 import { NextResponse, after } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { normalizeSupabaseUrl } from '@/lib/supabase/normalize-url'
-import { decrypt, encrypt, isLegacyFormat } from '@/lib/whatsapp/encryption'
+import { decrypt } from '@/lib/whatsapp/encryption'
 import { getMediaUrl } from '@/lib/whatsapp/meta-api'
 import { mirrorInboundMedia } from '@/lib/whatsapp/mirror-inbound-media'
 import { normalizePhone } from '@/lib/whatsapp/phone-utils'
@@ -186,84 +186,40 @@ export async function GET(request: Request) {
       )
     }
 
-    // 1. Fetch saved whatsapp configs from Supabase (WACRM settings source of truth)
-    let configs: { id: string; verify_token: string | null }[] | null = null
-    try {
-      const { data, error: configError } = await supabaseAdmin()
-        .from('whatsapp_config')
-        .select('id, verify_token')
+    // Platform-level verification:
+    // Read platform verify token(s) from WHATSAPP_VERIFY_TOKEN (with META_VERIFY_TOKEN compatibility fallback)
+    const platformSecrets = [
+      process.env.WHATSAPP_VERIFY_TOKEN,
+      process.env.META_VERIFY_TOKEN,
+    ].filter(Boolean) as string[]
 
-      if (configError) {
-        console.warn(
-          '[webhook] Failed to fetch whatsapp_config for verification:',
-          configError.message || configError
-        )
-      } else {
-        configs = data
+    const candidateTokens: string[] = []
+    for (const raw of platformSecrets) {
+      for (const token of raw.split(',')) {
+        const trimmed = token.trim()
+        if (trimmed) candidateTokens.push(trimmed)
       }
-    } catch (clientErr) {
-      console.warn(
-        '[webhook] supabaseAdmin client initialization failed during verification:',
-        clientErr instanceof Error ? clientErr.message : clientErr
+    }
+
+    if (candidateTokens.length === 0) {
+      console.error(
+        '[webhook] Webhook verification failed: no platform verify token configured (set WHATSAPP_VERIFY_TOKEN or META_VERIFY_TOKEN).'
+      )
+      return NextResponse.json(
+        { error: 'Platform webhook verify token is not configured' },
+        { status: 500 }
       )
     }
 
-    let matchedConfig: { id: string; verify_token: string | null } | null = null
     let tokenMatched = false
-
-    if (configs) {
-      for (const config of configs) {
-        if (!config.verify_token) continue
-        try {
-          if (verifyTokenMatches(decrypt(config.verify_token), verifyToken)) {
-            matchedConfig = config
-            tokenMatched = true
-            break
-          }
-        } catch (decryptErr) {
-          console.warn(
-            `[webhook] Failed to decrypt verify_token for config ${config.id}:`,
-            decryptErr instanceof Error ? decryptErr.message : decryptErr
-          )
-        }
-      }
-    }
-
-    // 2. Fallback to environment variable WHATSAPP_VERIFY_TOKEN or META_VERIFY_TOKEN
-    if (!tokenMatched) {
-      const envTokens = [
-        process.env.WHATSAPP_VERIFY_TOKEN,
-        process.env.META_VERIFY_TOKEN,
-      ].filter(Boolean) as string[]
-
-      for (const envVal of envTokens) {
-        for (const candidate of envVal.split(',').map((t) => t.trim()).filter(Boolean)) {
-          if (verifyTokenMatches(candidate, verifyToken)) {
-            tokenMatched = true
-            break
-          }
-        }
-        if (tokenMatched) break
+    for (const candidate of candidateTokens) {
+      if (verifyTokenMatches(candidate, verifyToken)) {
+        tokenMatched = true
+        break
       }
     }
 
     if (tokenMatched) {
-      // Fire-and-forget GCM upgrade. Safe to run on every subscribe
-      // since it's a no-op once the column is already GCM.
-      if (matchedConfig && matchedConfig.verify_token && isLegacyFormat(matchedConfig.verify_token)) {
-        void supabaseAdmin()
-          .from('whatsapp_config')
-          .update({ verify_token: encrypt(verifyToken) })
-          .eq('id', matchedConfig.id)
-          .then(({ error }: { error: unknown }) => {
-            if (error) {
-              console.warn(
-                '[webhook] verify_token GCM upgrade failed:',
-                (error as { message?: string })?.message ?? error,
-              )
-            }
-          })
-      }
       // Return challenge as plain text with 200 OK
       return new Response(challenge, {
         status: 200,
@@ -271,7 +227,9 @@ export async function GET(request: Request) {
       })
     }
 
-    console.warn('[webhook] Verification token mismatch: incoming token did not match any stored or environment token.')
+    console.warn(
+      '[webhook] Verification token mismatch: incoming token did not match platform verify token.'
+    )
     return NextResponse.json(
       { error: 'Verification token mismatch' },
       { status: 403 }
@@ -388,14 +346,10 @@ async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
             configError
           )
         } else if (!configRows || configRows.length === 0) {
-          console.error('No config found for phone_number_id:', phoneNumberId)
+          console.warn('[webhook] Unknown phone_number_id; no matching configuration:', phoneNumberId)
         } else if (configRows.length > 1) {
           console.error(
-            `Multiple configs (${configRows.length}) found for phone_number_id:`,
-            phoneNumberId,
-            '— event dropped to preserve cross-tenant isolation.',
-            'Account owners:',
-            configRows.map((r: { account_id: string; user_id: string }) => `${r.account_id} (admin ${r.user_id})`)
+            `[webhook] Multiple configs (${configRows.length}) found for phone_number_id: ${phoneNumberId} — event dropped to preserve cross-tenant isolation.`
           )
         } else {
           resolvedConfig = configRows[0] as WhatsAppConfigRow

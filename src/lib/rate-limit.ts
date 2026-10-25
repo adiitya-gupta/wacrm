@@ -179,38 +179,21 @@ export async function checkRateLimit(
     try {
       return await checkRedis(key, options, redisConfig);
     } catch (err) {
-      console.error(
-        '[rate-limit] Distributed Redis check failed:',
+      console.warn(
+        '[rate-limit] Distributed Redis check failed, falling back to local memory rate limiting:',
         err instanceof Error ? err.message : err,
       );
-
-      if (isProd) {
-        // Fail safely in production: do NOT silently fall back to an unlimited mode.
-        return {
-          success: false,
-          remaining: 0,
-          reset: Date.now() + Math.min(options.windowMs, 60_000),
-          limit: options.limit,
-        };
-      }
       return checkRateLimitSync(key, options);
     }
   }
 
+  // When Redis is not configured, enforce real per-instance memory rate limiting.
+  // This keeps abuse protection active without falsely rejecting valid requests with HTTP 429.
   if (isProd) {
-    // Fail safely in production when Redis credentials are not configured.
-    console.error(
-      '[rate-limit] CRITICAL: Production environment detected without UPSTASH_REDIS_REST_URL/TOKEN. Failing closed to prevent unthrottled abuse.',
+    console.warn(
+      '[rate-limit] Notice: Running without UPSTASH_REDIS_REST_URL/TOKEN. Enforcing local memory rate limiting.',
     );
-    return {
-      success: false,
-      remaining: 0,
-      reset: Date.now() + Math.min(options.windowMs, 60_000),
-      limit: options.limit,
-    };
   }
-
-  // Development and test offline fallback
   return checkRateLimitSync(key, options);
 }
 

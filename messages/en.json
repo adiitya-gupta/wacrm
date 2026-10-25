@@ -1765,7 +1765,7 @@
       "step4_1": "Go to WhatsApp > Configuration",
       "step4_2": "Click \"Edit\" on the Webhook section",
       "step4_3": "Paste the <strong class=\"text-foreground\">Webhook Callback URL</strong> from above",
-      "step4_4": "Enter the same <strong class=\"text-foreground\">Verify Token</strong> you set here",
+      "step4_4": "Enter the platform <strong class=\"text-foreground\">Verify Token</strong> (configured centrally in WHATSAPP_VERIFY_TOKEN)",
       "step4_5": "Subscribe to \"messages\" webhook field",
       "metaDocs": "Meta WhatsApp API Documentation",
       "lastSaveFailed": "Last save failed",

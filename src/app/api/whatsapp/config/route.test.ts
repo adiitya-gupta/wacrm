@@ -13,7 +13,7 @@ const STORED_CONFIG = {
   waba_id: '444555666',
   access_token: 'enc-token',
   status: 'connected',
-  registered_at: null,
+  registered_at: '2026-01-01T00:00:00.000Z',
   verify_token: null,
 }
 
@@ -29,7 +29,7 @@ function makeSupabaseMock() {
             error: null,
           }
         case 'accounts':
-          return { data: { id: 'acct-1', name: 'Acme' }, error: null }
+          return { data: { id: 'acct-1', name: 'Acme', approval_status: 'approved' }, error: null }
         case 'whatsapp_config':
           return { data: storedConfig, error: null }
         default:
@@ -76,7 +76,10 @@ vi.mock('@/lib/supabase/server', () => ({
   createClient: vi.fn(async () => supabaseMock),
 }))
 
-const serviceRole = vi.hoisted(() => ({ lookups: 0 }))
+const serviceRole = vi.hoisted(() => ({
+  lookups: 0,
+  conflictRow: null as { account_id: string } | null,
+}))
 
 vi.mock('@supabase/supabase-js', () => ({
   createClient: vi.fn(() => ({
@@ -84,7 +87,7 @@ vi.mock('@supabase/supabase-js', () => ({
       serviceRole.lookups += 1
       const b: Record<string, unknown> = {}
       for (const m of ['select', 'eq', 'neq']) b[m] = vi.fn(() => b)
-      b.maybeSingle = vi.fn(async () => ({ data: null, error: null }))
+      b.maybeSingle = vi.fn(async () => ({ data: serviceRole.conflictRow, error: null }))
       return b
     }),
   })),
@@ -96,7 +99,7 @@ vi.mock('@/lib/whatsapp/encryption', () => ({
 }))
 
 const meta = vi.hoisted(() => ({
-  verifyPhoneNumber: vi.fn(async () => ({ id: '111222333', display_phone_number: '+1 555 0100' })),
+  verifyPhoneNumber: vi.fn(async () => ({ id: '111222333', verified_name: 'Acme Support' })),
   listWabaPhoneNumbers: vi.fn(async () => [{ id: '111222333' }]),
   registerPhoneNumber: vi.fn(async () => ({ success: true })),
   subscribeWabaToApp: vi.fn(async () => ({ success: true })),
@@ -107,7 +110,7 @@ vi.mock('@/lib/whatsapp/meta-api', () => meta)
 import { DELETE, GET, POST } from './route'
 import { __resetRateLimitForTests } from '@/lib/rate-limit'
 
-function saveConfig() {
+function saveConfig(bodyOverrides: Record<string, unknown> = {}) {
   return POST(
     new Request('http://localhost/api/whatsapp/config', {
       method: 'POST',
@@ -117,6 +120,7 @@ function saveConfig() {
         waba_id: '444555666',
         access_token: 'caller-supplied-token',
         pin: '123456',
+        ...bodyOverrides,
       }),
     }),
   )
@@ -141,6 +145,7 @@ beforeEach(() => {
   configUpdates.length = 0
   configDeletes = 0
   serviceRole.lookups = 0
+  serviceRole.conflictRow = null
   supabaseMock = makeSupabaseMock()
   for (const fn of Object.values(meta)) fn.mockClear()
 })
@@ -182,6 +187,92 @@ describe('POST /api/whatsapp/config', () => {
     expect(meta.subscribeWabaToApp).toHaveBeenCalledTimes(1)
     expect(configInserts).toHaveLength(1)
     expect(configInserts[0]).toMatchObject({ account_id: 'acct-1', user_id: 'user-1' })
+  })
+
+  it('saves credentials without requiring prior Meta webhook verification handshake', async () => {
+    // Platform webhook verification is completely separate from tenant config save
+    delete process.env.WHATSAPP_VERIFY_TOKEN
+    delete process.env.META_VERIFY_TOKEN
+
+    const res = await saveConfig()
+    expect(res.status).toBe(200)
+    expect(configInserts).toHaveLength(1)
+  })
+
+  it('enforces tenant isolation and rejects saving a number claimed by another account', async () => {
+    serviceRole.conflictRow = { account_id: 'other-tenant-account' }
+
+    const res = await saveConfig()
+    expect(res.status).toBe(409)
+    const body = await res.json()
+    expect(body.error).toContain('already linked to another account')
+    expect(configInserts).toHaveLength(0)
+  })
+
+  it('updates existing record on repeated submission without creating duplicate rows', async () => {
+    storedConfig = STORED_CONFIG
+
+    const res = await saveConfig()
+    expect(res.status).toBe(200)
+    expect(configInserts).toHaveLength(0)
+    expect(configUpdates).toHaveLength(1)
+  })
+
+  it('accurately reports Meta credential validation failure and does not leak secrets', async () => {
+    meta.verifyPhoneNumber.mockRejectedValueOnce({
+      name: 'MetaApiError',
+      message: 'Invalid OAuth access token - Cannot parse access token',
+      status: 400,
+      code: 190,
+      subcode: 467,
+      fbtraceId: 'fb_trace_12345',
+    })
+
+    const res = await saveConfig()
+    expect(res.status).toBe(400)
+    const body = await res.json()
+    expect(body.error).toBeDefined()
+    expect(body.meta).toMatchObject({
+      code: 190,
+      step: 'verify_number',
+      fbtrace_id: 'fb_trace_12345',
+    })
+    // Secrets must never be leaked
+    expect(JSON.stringify(body)).not.toContain('caller-supplied-token')
+    expect(configInserts).toHaveLength(0)
+  })
+
+  it('enforces rate limits and returns 429 when limit is legitimately exceeded', async () => {
+    // whatsappAdmin limit is 30/minute
+    for (let i = 0; i < 30; i++) {
+      const okRes = await saveConfig()
+      expect(okRes.status).toBe(200)
+    }
+
+    // 31st request exceeds the rate limit
+    const overRes = await saveConfig()
+    expect(overRes.status).toBe(429)
+    const body = await overRes.json()
+    expect(body.error).toBe('Rate limit exceeded')
+    expect(body.retry_after_seconds).toBeGreaterThan(0)
+    expect(overRes.headers.get('Retry-After')).toBeDefined()
+    expect(overRes.headers.get('X-RateLimit-Limit')).toBe('30')
+  })
+
+  it('does not falsely return 429 in production when Redis is unconfigured, enforcing local limits', async () => {
+    const originalEnv = process.env.NODE_ENV
+    try {
+      (process.env as Record<string, string | undefined>).NODE_ENV = 'production'
+      delete process.env.UPSTASH_REDIS_REST_URL
+      delete process.env.UPSTASH_REDIS_REST_TOKEN
+
+      // First save must succeed (not falsely rejected with 429!)
+      const res = await saveConfig()
+      expect(res.status).toBe(200)
+      expect(configInserts).toHaveLength(1)
+    } finally {
+      (process.env as Record<string, string | undefined>).NODE_ENV = originalEnv
+    }
   })
 })
 

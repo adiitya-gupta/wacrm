@@ -101,10 +101,8 @@ export function WhatsAppConfig() {
   const [phoneNumberId, setPhoneNumberId] = useState('');
   const [wabaId, setWabaId] = useState('');
   const [accessToken, setAccessToken] = useState('');
-  const [verifyToken, setVerifyToken] = useState('');
   const [pin, setPin] = useState('');
   const [tokenEdited, setTokenEdited] = useState(false);
-  const [verifyEdited, setVerifyEdited] = useState(false);
 
   // Inbound-media mirror (issue #466). Unlike everything else on this
   // page it is NOT part of handleSave: that path insists on re-entering
@@ -164,11 +162,6 @@ export function WhatsAppConfig() {
         setPhoneNumberId(data.phone_number_id || '');
         setWabaId(data.waba_id || '');
         setAccessToken(MASKED_TOKEN);
-        // Same treatment as the access token: the row carries the encrypted
-        // value, which is enough to know one exists. Show a mask instead of
-        // an empty box so nobody concludes the token was never saved.
-        setVerifyToken(data.verify_token ? MASKED_TOKEN : '');
-        setVerifyEdited(false);
         setPin('');
         setTokenEdited(false);
         // Undefined on a row read before migration 039 — treat that as
@@ -179,10 +172,8 @@ export function WhatsAppConfig() {
         setPhoneNumberId('');
         setWabaId('');
         setAccessToken('');
-        setVerifyToken('');
         setPin('');
         setTokenEdited(false);
-        setVerifyEdited(false);
         setMirrorMedia(true);
       }
       // Clear any stale probe result when reloading the row.
@@ -294,14 +285,6 @@ export function WhatsAppConfig() {
       const payload: Record<string, unknown> = {
         phone_number_id: phoneNumberId.trim(),
         waba_id: wabaId.trim() || null,
-        // Only sent when the user actually typed one. Left out otherwise
-        // (undefined is dropped from the JSON body) so the server keeps the
-        // stored token instead of nulling it — see resolveVerifyTokenForSave.
-        ...(verifyEdited &&
-        verifyToken.trim() &&
-        verifyToken.trim() !== MASKED_TOKEN
-          ? { verify_token: verifyToken.trim() }
-          : {}),
         // Optional — only sent when the user filled it in. The server
         // requires it on first save or when changing numbers; for a
         // simple token rotation, leaving it blank skips re-register.
@@ -468,9 +451,7 @@ export function WhatsAppConfig() {
       setPhoneNumberId('');
       setWabaId('');
       setAccessToken('');
-      setVerifyToken('');
       setTokenEdited(false);
-      setVerifyEdited(false);
       setConnectionStatus('disconnected');
       setResetReason(null);
       setStatusMessage('');
@@ -802,29 +783,6 @@ export function WhatsAppConfig() {
               )}
             </div>
 
-            <div className="space-y-2">
-              <Label className="text-muted-foreground">{t('webhookVerifyToken')}</Label>
-              <Input
-                placeholder={t('webhookVerifyTokenPlaceholder')}
-                value={verifyToken}
-                onChange={(e) => {
-                  setVerifyToken(e.target.value);
-                  setVerifyEdited(true);
-                }}
-                onFocus={() => {
-                  if (verifyToken === MASKED_TOKEN) {
-                    setVerifyToken('');
-                    setVerifyEdited(true);
-                  }
-                }}
-                className="bg-muted border-border text-foreground placeholder:text-muted-foreground"
-              />
-              <p className="text-xs text-muted-foreground">
-                {config?.verify_token && !verifyEdited
-                  ? t('webhookVerifyTokenSaved')
-                  : t('webhookVerifyTokenHint')}
-              </p>
-            </div>
 
             <div className="space-y-2">
               <Label className="text-muted-foreground">
@@ -852,12 +810,17 @@ export function WhatsAppConfig() {
         {/* Webhook URL */}
         <Card>
           <CardHeader>
-            <CardTitle className="text-foreground">{t('webhookTitle')}</CardTitle>
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-foreground">{t('webhookTitle')}</CardTitle>
+              <span className="inline-flex items-center rounded-full bg-emerald-500/10 px-2.5 py-0.5 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+                Shared Platform Webhook
+              </span>
+            </div>
             <CardDescription className="text-muted-foreground">
               {t('webhookDesc')}
             </CardDescription>
           </CardHeader>
-          <CardContent>
+          <CardContent className="space-y-3">
             <div className="space-y-2">
               <Label className="text-muted-foreground">{t('webhookUrl')}</Label>
               <div className="flex gap-2">
@@ -876,6 +839,9 @@ export function WhatsAppConfig() {
                 </Button>
               </div>
             </div>
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              Platform webhook verification is configured once centrally for all Wattomation tenants. Inbound WhatsApp messages are automatically routed to your workspace based on your registered Phone Number ID.
+            </p>
           </CardContent>
         </Card>
 

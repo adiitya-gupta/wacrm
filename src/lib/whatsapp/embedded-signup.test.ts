@@ -147,6 +147,55 @@ describe('Embedded Signup Client Helpers', () => {
       expect(res2.wabaId).toBe('777888');
     });
 
+    it('extracts modern Meta v5 messaging_account_ids plural array and string', () => {
+      // Modern Meta v5 payload structure with array of messaging_account_ids
+      const res1 = extractEmbeddedSignupData({
+        data: {
+          phone_number_id: '111222333',
+          messaging_account_ids: ['999888777'],
+          business_id: '555444333',
+        },
+      });
+      expect(res1.wabaId).toBe('999888777');
+      expect(res1.phoneNumberId).toBe('111222333');
+      expect(res1.businessId).toBe('555444333');
+
+      // messaging_account_ids as a single string
+      const res2 = extractEmbeddedSignupData({
+        data: {
+          messaging_account_ids: '888777666',
+        },
+      });
+      expect(res2.wabaId).toBe('888777666');
+
+      // Array with leading empty or whitespace items
+      const res3 = extractEmbeddedSignupData({
+        data: {
+          messaging_account_ids: ['', '  ', '777666555'],
+        },
+      });
+      expect(res3.wabaId).toBe('777666555');
+
+      // camelCase messagingAccountIds array and string
+      const res4 = extractEmbeddedSignupData({
+        data: {
+          messagingAccountIds: ['666555444'],
+          phoneNumber: '111222',
+        },
+      });
+      expect(res4.wabaId).toBe('666555444');
+      expect(res4.phoneNumberId).toBe('111222');
+
+      const res5 = extractEmbeddedSignupData({
+        data: {
+          whatsappBusinessAccountId: '555444111',
+          ownerBusinessId: '999000',
+        },
+      });
+      expect(res5.wabaId).toBe('555444111');
+      expect(res5.businessId).toBe('999000');
+    });
+
     it('extracts from flat top-level payload', () => {
       const res = extractEmbeddedSignupData({
         waba_id: '101010',
@@ -240,6 +289,28 @@ describe('Embedded Signup Client Helpers', () => {
       const result = parseMetaMessageEvent(event);
       expect(result?.event).toBe('FINISH');
       expect(result?.data?.phone_number_id).toBe('999');
+    });
+
+    it('successfully parses Meta v5 postMessage with messaging_account_ids array', () => {
+      const payload = {
+        type: 'WA_EMBEDDED_SIGNUP',
+        event: 'FINISH',
+        data: {
+          phone_number_id: '999888111',
+          messaging_account_ids: ['555444333'],
+          business_id: '123456789',
+        },
+      };
+      const event = {
+        origin: 'https://www.facebook.com',
+        data: payload,
+      } as MessageEvent;
+
+      const result = parseMetaMessageEvent(event);
+      expect(result?.event).toBe('FINISH');
+      expect(result?.data?.waba_id).toBe('555444333');
+      expect(result?.data?.phone_number_id).toBe('999888111');
+      expect(result?.data?.business_id).toBe('123456789');
     });
 
     it('handles FINISH_ONLY_WABA and FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING events', () => {

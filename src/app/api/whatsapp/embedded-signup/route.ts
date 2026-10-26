@@ -71,9 +71,51 @@ export async function POST(request: Request) {
 
     const body = await request.json().catch(() => null);
     const code = body?.code;
-    let wabaId = body?.waba_id?.toString().trim();
-    let phoneNumberId = body?.phone_number_id?.toString().trim();
-    const businessId = body?.business_id?.toString().trim();
+    const rawWabaId =
+      body?.waba_id ??
+      body?.wabaId ??
+      body?.messaging_account_id ??
+      body?.messagingAccountId ??
+      body?.messaging_account_ids ??
+      body?.messagingAccountIds ??
+      body?.whatsapp_business_account_id ??
+      body?.whatsappBusinessAccountId;
+    let wabaId: string | undefined;
+    if (Array.isArray(rawWabaId)) {
+      const first = rawWabaId.find((item) => item !== undefined && item !== null && String(item).trim() !== '');
+      if (first !== undefined) wabaId = String(first).trim();
+    } else if (rawWabaId !== undefined && rawWabaId !== null && typeof rawWabaId !== 'object') {
+      const clean = String(rawWabaId).trim();
+      if (clean) wabaId = clean;
+    }
+
+    const rawPhoneId =
+      body?.phone_number_id ??
+      body?.phoneNumberId ??
+      body?.phone_number ??
+      body?.phoneNumber;
+    let phoneNumberId: string | undefined;
+    if (Array.isArray(rawPhoneId)) {
+      const first = rawPhoneId.find((item) => item !== undefined && item !== null && String(item).trim() !== '');
+      if (first !== undefined) phoneNumberId = String(first).trim();
+    } else if (rawPhoneId !== undefined && rawPhoneId !== null && typeof rawPhoneId !== 'object') {
+      const clean = String(rawPhoneId).trim();
+      if (clean) phoneNumberId = clean;
+    }
+
+    const rawBizId =
+      body?.business_id ??
+      body?.businessId ??
+      body?.owner_business_id ??
+      body?.ownerBusinessId;
+    let businessId: string | undefined;
+    if (Array.isArray(rawBizId)) {
+      const first = rawBizId.find((item) => item !== undefined && item !== null && String(item).trim() !== '');
+      if (first !== undefined) businessId = String(first).trim();
+    } else if (rawBizId !== undefined && rawBizId !== null && typeof rawBizId !== 'object') {
+      const clean = String(rawBizId).trim();
+      if (clean) businessId = clean;
+    }
 
     if (!code || typeof code !== 'string' || !code.trim()) {
       return NextResponse.json(

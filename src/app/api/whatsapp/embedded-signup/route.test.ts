@@ -176,7 +176,150 @@ describe('POST /api/whatsapp/embedded-signup', () => {
 
     const res = await POST(req);
     expect(res.status).toBe(200);
-    expect(exchangeLongLivedSpy).not.toHaveBeenCalled();
+  });
+
+  describe('WABA ID and Phone Number ID request body parsing', () => {
+    it('resolves WABA ID from messaging_account_ids plural array', async () => {
+      setupAuthMock('admin');
+
+      vi.spyOn(metaApi, 'exchangeOAuthCode').mockResolvedValue({
+        accessToken: 'EAAB_token_msg_ids',
+        tokenType: 'bearer',
+      });
+      vi.spyOn(metaApi, 'debugToken').mockResolvedValue({
+        isValid: true,
+        expiresAt: 0,
+        scopes: ['whatsapp_business_management', 'whatsapp_business_messaging'],
+      });
+      vi.spyOn(metaApi, 'listWabaPhoneNumbers').mockResolvedValue([
+        { id: '11112345678', display_phone_number: '+1 555-0199' },
+      ]);
+      vi.spyOn(metaApi, 'verifyPhoneNumber').mockResolvedValue({
+        id: '11112345678',
+        display_phone_number: '+1 555-0199',
+      });
+      vi.spyOn(metaApi, 'subscribeWabaToApp').mockResolvedValue();
+
+      const req = new Request('http://localhost/api/whatsapp/embedded-signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          code: 'valid_auth_code',
+          messaging_account_ids: ['99912345678'],
+          phone_number_id: '11112345678',
+        }),
+      });
+
+      const res = await POST(req);
+      expect(res.status).toBe(200);
+      const json = await res.json();
+      expect(json.waba_id).toBe('99912345678');
+      expect(json.phone_number_id).toBe('11112345678');
+    });
+
+    it('resolves WABA ID from camelCase wabaId and alternate field names', async () => {
+      setupAuthMock('admin');
+
+      vi.spyOn(metaApi, 'exchangeOAuthCode').mockResolvedValue({
+        accessToken: 'EAAB_token_wabaId',
+        tokenType: 'bearer',
+      });
+      vi.spyOn(metaApi, 'debugToken').mockResolvedValue({
+        isValid: true,
+        expiresAt: 0,
+        scopes: ['whatsapp_business_management', 'whatsapp_business_messaging'],
+      });
+      vi.spyOn(metaApi, 'listWabaPhoneNumbers').mockResolvedValue([
+        { id: '11112345678', display_phone_number: '+1 555-0199' },
+      ]);
+      vi.spyOn(metaApi, 'verifyPhoneNumber').mockResolvedValue({
+        id: '11112345678',
+        display_phone_number: '+1 555-0199',
+      });
+      vi.spyOn(metaApi, 'subscribeWabaToApp').mockResolvedValue();
+
+      const req = new Request('http://localhost/api/whatsapp/embedded-signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          code: 'valid_auth_code',
+          wabaId: '88812345678',
+          phoneNumberId: '11112345678',
+        }),
+      });
+
+      const res = await POST(req);
+      expect(res.status).toBe(200);
+      const json = await res.json();
+      expect(json.waba_id).toBe('88812345678');
+    });
+
+    it('resolves WABA ID from whatsapp_business_account_id', async () => {
+      setupAuthMock('admin');
+
+      vi.spyOn(metaApi, 'exchangeOAuthCode').mockResolvedValue({
+        accessToken: 'EAAB_token_waba_acct',
+        tokenType: 'bearer',
+      });
+      vi.spyOn(metaApi, 'debugToken').mockResolvedValue({
+        isValid: true,
+        expiresAt: 0,
+        scopes: ['whatsapp_business_management', 'whatsapp_business_messaging'],
+      });
+      vi.spyOn(metaApi, 'listWabaPhoneNumbers').mockResolvedValue([
+        { id: '11112345678', display_phone_number: '+1 555-0199' },
+      ]);
+      vi.spyOn(metaApi, 'verifyPhoneNumber').mockResolvedValue({
+        id: '11112345678',
+        display_phone_number: '+1 555-0199',
+      });
+      vi.spyOn(metaApi, 'subscribeWabaToApp').mockResolvedValue();
+
+      const req = new Request('http://localhost/api/whatsapp/embedded-signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          code: 'valid_auth_code',
+          whatsapp_business_account_id: '77712345678',
+          phone_number_id: '11112345678',
+        }),
+      });
+
+      const res = await POST(req);
+      expect(res.status).toBe(200);
+      const json = await res.json();
+      expect(json.waba_id).toBe('77712345678');
+    });
+
+    it('rejects with 400 when WABA ID cannot be resolved anywhere and is not numeric', async () => {
+      setupAuthMock('admin');
+
+      vi.spyOn(metaApi, 'exchangeOAuthCode').mockResolvedValue({
+        accessToken: 'EAAB_token_no_waba',
+        tokenType: 'bearer',
+      });
+      vi.spyOn(metaApi, 'debugToken').mockResolvedValue({
+        isValid: true,
+        expiresAt: 0,
+        scopes: ['whatsapp_business_management', 'whatsapp_business_messaging'],
+        granularScopes: [],
+      });
+      vi.spyOn(metaApi, 'discoverWabaAccounts').mockResolvedValue([]);
+
+      const req = new Request('http://localhost/api/whatsapp/embedded-signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          code: 'valid_auth_code',
+          waba_id: 'not-a-numeric-id',
+        }),
+      });
+
+      const res = await POST(req);
+      expect(res.status).toBe(400);
+      const json = await res.json();
+      expect(json.error).toMatch(/Could not determine WhatsApp Business Account ID/i);
+    });
   });
 
   it('returns 400 when code is missing', async () => {

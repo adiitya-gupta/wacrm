@@ -156,25 +156,58 @@ export function extractEmbeddedSignupData(payload: unknown): {
 
   for (const obj of candidates) {
     if (!wabaId) {
-      const val =
+      let rawVal =
         obj.waba_id ??
         obj.wabaId ??
         obj.whatsapp_business_account_id ??
-        obj.messaging_account_id;
-      if (val !== undefined && val !== null && String(val).trim()) {
-        wabaId = String(val).trim();
+        obj.whatsappBusinessAccountId ??
+        obj.messaging_account_id ??
+        obj.messagingAccountId ??
+        obj.messaging_account_ids ??
+        obj.messagingAccountIds;
+
+      if (Array.isArray(rawVal)) {
+        rawVal = rawVal.find((item) => item !== undefined && item !== null && String(item).trim() !== '');
+      }
+      if (rawVal !== undefined && rawVal !== null && typeof rawVal !== 'object') {
+        const cleaned = String(rawVal).trim();
+        if (cleaned) {
+          wabaId = cleaned;
+        }
       }
     }
     if (!phoneNumberId) {
-      const val = obj.phone_number_id ?? obj.phoneNumberId ?? obj.phone_number;
-      if (val !== undefined && val !== null && String(val).trim()) {
-        phoneNumberId = String(val).trim();
+      let rawVal =
+        obj.phone_number_id ??
+        obj.phoneNumberId ??
+        obj.phone_number ??
+        obj.phoneNumber;
+
+      if (Array.isArray(rawVal)) {
+        rawVal = rawVal.find((item) => item !== undefined && item !== null && String(item).trim() !== '');
+      }
+      if (rawVal !== undefined && rawVal !== null && typeof rawVal !== 'object') {
+        const cleaned = String(rawVal).trim();
+        if (cleaned) {
+          phoneNumberId = cleaned;
+        }
       }
     }
     if (!businessId) {
-      const val = obj.business_id ?? obj.businessId ?? obj.owner_business_id;
-      if (val !== undefined && val !== null && String(val).trim()) {
-        businessId = String(val).trim();
+      let rawVal =
+        obj.business_id ??
+        obj.businessId ??
+        obj.owner_business_id ??
+        obj.ownerBusinessId;
+
+      if (Array.isArray(rawVal)) {
+        rawVal = rawVal.find((item) => item !== undefined && item !== null && String(item).trim() !== '');
+      }
+      if (rawVal !== undefined && rawVal !== null && typeof rawVal !== 'object') {
+        const cleaned = String(rawVal).trim();
+        if (cleaned) {
+          businessId = cleaned;
+        }
       }
     }
     if (!currentStep) {

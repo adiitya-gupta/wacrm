@@ -116,6 +116,12 @@ const meta = vi.hoisted(() => ({
   ),
   subscribeWabaToApp: vi.fn(async () => ({ success: true })),
   getSubscribedApps: vi.fn(async () => []),
+  debugToken: vi.fn(async () => ({
+    isValid: true,
+    scopes: ['whatsapp_business_management', 'whatsapp_business_messaging'],
+    granularScopes: [],
+  })),
+  discoverWabaAccounts: vi.fn(async () => [{ id: '444555666', name: 'Acme WABA' }]),
 }))
 vi.mock('@/lib/whatsapp/meta-api', () => meta)
 
@@ -305,7 +311,24 @@ describe('POST /api/whatsapp/config', () => {
     expect(configInserts[0].last_registration_error).toBeNull()
   })
 
-  it('registers successfully via PIN-less registration when Meta status is not CONNECTED and register succeeds', async () => {
+  it('safely skips registration and does NOT call registerPhoneNumber when number is not CONNECTED and no PIN is provided', async () => {
+    meta.verifyPhoneNumber.mockResolvedValueOnce({
+      id: '111222333',
+      verified_name: 'Acme Support',
+      status: 'PENDING',
+    })
+
+    const res = await saveConfig({ pin: undefined })
+    const body = await res.json()
+
+    expect(res.status).toBe(200)
+    expect(body).toMatchObject({ success: true, saved: true, registered: false, registration_skipped: true })
+    expect(meta.registerPhoneNumber).not.toHaveBeenCalled()
+    expect(configInserts[0].registered_at).toBeNull()
+    expect(body.notice).toContain('not yet registered for Cloud API')
+  })
+
+  it('calls registerPhoneNumber with PIN when number is not CONNECTED and 6-digit PIN is provided', async () => {
     meta.verifyPhoneNumber.mockResolvedValueOnce({
       id: '111222333',
       verified_name: 'Acme Support',
@@ -313,7 +336,7 @@ describe('POST /api/whatsapp/config', () => {
     })
     meta.registerPhoneNumber.mockResolvedValueOnce({ success: true, alreadyRegistered: false })
 
-    const res = await saveConfig({ pin: undefined })
+    const res = await saveConfig({ pin: '123456' })
     const body = await res.json()
 
     expect(res.status).toBe(200)
@@ -321,31 +344,10 @@ describe('POST /api/whatsapp/config', () => {
     expect(meta.registerPhoneNumber).toHaveBeenCalledWith({
       phoneNumberId: '111222333',
       accessToken: 'caller-supplied-token',
+      pin: '123456',
     })
     expect(configInserts[0].registered_at).toBeDefined()
     expect(configInserts[0].registered_at).not.toBeNull()
-  })
-
-  it('fails registration and does not set registered_at when PIN-less registration fails because PIN is required', async () => {
-    meta.verifyPhoneNumber.mockResolvedValueOnce({
-      id: '111222333',
-      verified_name: 'Acme Support',
-      status: 'PENDING',
-    })
-    meta.registerPhoneNumber.mockRejectedValueOnce({
-      name: 'MetaApiError',
-      message: 'Two-step verification PIN required.',
-      code: 133007,
-    })
-
-    const res = await saveConfig({ pin: undefined })
-    const body = await res.json()
-
-    expect(res.status).toBe(200)
-    expect(body).toMatchObject({ success: false, saved: true, registered: false })
-    expect(body.registration_error).toMatch(/two-step verification PIN/i)
-    expect(configInserts[0].registered_at).toBeNull()
-    expect(configInserts[0].last_registration_error).toMatch(/two-step verification PIN/i)
   })
 
   it('fails registration and does not set registered_at when user supplies wrong PIN', async () => {
@@ -364,17 +366,12 @@ describe('POST /api/whatsapp/config', () => {
     expect(configInserts[0].last_registration_error).toContain('PIN is wrong')
   })
 
-  it('clears registered_at when number is re-saved but Meta reports DISCONNECTED and PIN-less register fails', async () => {
+  it('clears registered_at without blind register when number is re-saved but Meta reports DISCONNECTED and no PIN is given', async () => {
     storedConfig = STORED_CONFIG
     meta.verifyPhoneNumber.mockResolvedValueOnce({
       id: '111222333',
       verified_name: 'Acme Support',
       status: 'DISCONNECTED',
-    })
-    meta.registerPhoneNumber.mockRejectedValueOnce({
-      name: 'MetaApiError',
-      message: 'Rate limit or registration error',
-      code: 133010,
     })
 
     const res = await saveConfig({ pin: undefined })
@@ -382,7 +379,132 @@ describe('POST /api/whatsapp/config', () => {
 
     expect(res.status).toBe(200)
     expect(body.registered).toBe(false)
+    expect(meta.registerPhoneNumber).not.toHaveBeenCalled()
     expect(configUpdates[0].registered_at).toBeNull()
+  })
+
+  it('supports validate_only dry-run without writing to database', async () => {
+    const res = await saveConfig({ validate_only: true })
+    const body = await res.json()
+
+    expect(res.status).toBe(200)
+    expect(body.valid).toBe(true)
+    expect(body.phone_info).toBeDefined()
+    expect(configInserts).toHaveLength(0)
+    expect(configUpdates).toHaveLength(0)
+  })
+
+  it('safely reuses existing decrypted token when updating config without re-entering token', async () => {
+    storedConfig = STORED_CONFIG
+
+    // Client passes masked token or omits access_token during a setting update
+    const res = await saveConfig({ access_token: '••••••••••••••••', pin: '654321' })
+    const body = await res.json()
+
+    expect(res.status).toBe(200)
+    expect(body.success).toBe(true)
+    expect(configUpdates).toHaveLength(1)
+    expect(meta.verifyPhoneNumber).toHaveBeenCalledWith({
+      phoneNumberId: '111222333',
+      accessToken: 'plaintext-token',
+    })
+  })
+
+  it('auto-discovers WABA ID when waba_id is omitted from manual connection payload', async () => {
+    meta.discoverWabaAccounts.mockResolvedValueOnce([{ id: '444555666', name: 'Discovered WABA' }])
+    meta.listWabaPhoneNumbers.mockResolvedValueOnce([{ id: '111222333' }])
+
+    const res = await saveConfig({ waba_id: undefined })
+    const body = await res.json()
+
+    expect(res.status).toBe(200)
+    expect(body.success).toBe(true)
+    expect(configInserts[0].waba_id).toBe('444555666')
+    expect(meta.subscribeWabaToApp).toHaveBeenCalledWith({
+      wabaId: '444555666',
+      accessToken: 'caller-supplied-token',
+    })
+  })
+
+  it('auto-selects Phone Number ID when phone_number_id is omitted and WABA has single phone number', async () => {
+    meta.listWabaPhoneNumbers.mockResolvedValueOnce([{ id: '999888777' }])
+
+    const res = await saveConfig({ phone_number_id: undefined, waba_id: '444555666' })
+    const body = await res.json()
+
+    expect(res.status).toBe(200)
+    expect(body.success).toBe(true)
+    expect(configInserts[0].phone_number_id).toBe('999888777')
+    expect(meta.verifyPhoneNumber).toHaveBeenCalledWith({
+      phoneNumberId: '999888777',
+      accessToken: 'caller-supplied-token',
+    })
+  })
+
+  it('rejects with 400 when debugToken reports token is invalid or expired', async () => {
+    process.env.META_APP_ID = 'app-123'
+    process.env.META_APP_SECRET = 'secret-123'
+
+    meta.debugToken.mockResolvedValueOnce({
+      isValid: false,
+      scopes: [],
+      granularScopes: [],
+    })
+
+    const res = await saveConfig()
+    expect(res.status).toBe(400)
+    const body = await res.json()
+    expect(body.error).toMatch(/invalid or expired/i)
+    expect(configInserts).toHaveLength(0)
+
+    delete process.env.META_APP_ID
+    delete process.env.META_APP_SECRET
+  })
+
+  it('rejects with 400 and names missing permissions when debugToken scopes lack required permissions', async () => {
+    process.env.META_APP_ID = 'app-123'
+    process.env.META_APP_SECRET = 'secret-123'
+
+    meta.debugToken.mockResolvedValueOnce({
+      isValid: true,
+      scopes: ['whatsapp_business_messaging'], // missing whatsapp_business_management
+      granularScopes: [],
+    })
+
+    const res = await saveConfig()
+    expect(res.status).toBe(400)
+    const body = await res.json()
+    expect(body.error).toContain('whatsapp_business_management')
+    expect(configInserts).toHaveLength(0)
+
+    delete process.env.META_APP_ID
+    delete process.env.META_APP_SECRET
+  })
+
+  it('rejects with 400 when Phone Number ID does not belong to specified WABA', async () => {
+    meta.listWabaPhoneNumbers.mockResolvedValueOnce([{ id: 'other-phone-id' }])
+
+    const res = await saveConfig({ phone_number_id: '111222333', waba_id: '444555666' })
+    expect(res.status).toBe(400)
+    const body = await res.json()
+    expect(body.error).toMatch(/does not belong to/i)
+    expect(configInserts).toHaveLength(0)
+  })
+
+  it('fails safely and does not persist row when subscribeWabaToApp fails', async () => {
+    meta.subscribeWabaToApp.mockRejectedValueOnce({
+      name: 'MetaApiError',
+      message: 'Failed to subscribe webhook',
+      status: 400,
+      code: 100,
+    })
+
+    const res = await saveConfig()
+    expect(res.status).toBe(400)
+    const body = await res.json()
+    expect(body.error).toBeDefined()
+    expect(configInserts).toHaveLength(0)
+    expect(configUpdates).toHaveLength(0)
   })
 })
 

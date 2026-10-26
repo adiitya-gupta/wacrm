@@ -8,6 +8,8 @@ import {
   toErrorResponse,
 } from '@/lib/auth/account'
 import {
+  debugToken,
+  discoverWabaAccounts,
   getSubscribedApps,
   listWabaPhoneNumbers,
   registerPhoneNumber,
@@ -276,9 +278,100 @@ export async function POST(request: Request) {
     if (!limit.success) return rateLimitResponse(limit)
 
     const body = await request.json()
-    const { phone_number_id, waba_id, access_token, verify_token, pin } = body
+    const { phone_number_id, waba_id, access_token, verify_token, pin, validate_only } = body
 
-    if (!access_token || !phone_number_id) {
+    // 1. Look up any pre-existing row for this account early to support:
+    //    a) safe credential updates without re-entering the token if unchanged
+    //    b) reusing verified phone_number_id or waba_id if omitted during update
+    const { data: existing } = await supabase
+      .from('whatsapp_config')
+      .select('id, registered_at, phone_number_id, waba_id, access_token, verify_token')
+      .eq('account_id', accountId)
+      .maybeSingle()
+
+    let resolvedToken = typeof access_token === 'string' ? access_token.trim() : ''
+    const MASKED_TOKEN = '••••••••••••••••'
+    if ((!resolvedToken || resolvedToken === MASKED_TOKEN) && existing?.access_token) {
+      try {
+        resolvedToken = decrypt(existing.access_token)
+      } catch (decErr) {
+        console.error('[whatsapp/config POST] Failed to decrypt existing token for update:', decErr)
+        return NextResponse.json(
+          { error: t('whatsappConfig.tokenCorrupted') },
+          { status: 400 }
+        )
+      }
+    }
+
+    let resolvedPhoneNumberId = typeof phone_number_id === 'string' ? phone_number_id.trim() : ''
+    let resolvedWabaId = typeof waba_id === 'string' ? waba_id.trim() : ''
+
+    if (!resolvedPhoneNumberId && existing?.phone_number_id) {
+      resolvedPhoneNumberId = existing.phone_number_id
+    }
+    if (!resolvedWabaId && existing?.waba_id) {
+      resolvedWabaId = existing.waba_id
+    }
+
+    if (!resolvedToken) {
+      return NextResponse.json(
+        { error: t('whatsappConfig.credentialsRequired') },
+        { status: 400 }
+      )
+    }
+
+    let fetchedWabaNumbers: Array<{ id: string; display_phone_number?: string; verified_name?: string }> | null = null
+    // Auto-discovery: If waba_id is known but phone_number_id is omitted,
+    // list phone numbers under the WABA. If exactly one exists, auto-select it.
+    if (!resolvedPhoneNumberId && resolvedWabaId && isNumericMetaId(resolvedWabaId)) {
+      try {
+        const wabaNumbers = await listWabaPhoneNumbers({
+          wabaId: resolvedWabaId,
+          accessToken: resolvedToken,
+        })
+        fetchedWabaNumbers = wabaNumbers
+        if (wabaNumbers.length === 1 && wabaNumbers[0].id) {
+          resolvedPhoneNumberId = wabaNumbers[0].id
+        } else if (wabaNumbers.length > 1) {
+          return NextResponse.json(
+            {
+              error: 'Multiple phone numbers were found under this WhatsApp Business Account. Please specify the Phone Number ID to connect.',
+              field: 'phone_number_id',
+            },
+            { status: 400 }
+          )
+        }
+      } catch {
+        // Will be validated below
+      }
+    }
+
+    // Auto-discovery: If phone_number_id is known but waba_id is omitted,
+    // attempt to discover accessible WABA accounts that own this number.
+    if (!resolvedWabaId && resolvedPhoneNumberId && isNumericMetaId(resolvedPhoneNumberId)) {
+      try {
+        const discovered = await discoverWabaAccounts({ accessToken: resolvedToken })
+        for (const acct of discovered) {
+          try {
+            const numbers = await listWabaPhoneNumbers({
+              wabaId: acct.id,
+              accessToken: resolvedToken,
+            })
+            if (phoneNumberBelongsToWaba(numbers, resolvedPhoneNumberId)) {
+              resolvedWabaId = acct.id
+              fetchedWabaNumbers = numbers
+              break
+            }
+          } catch {
+            // Check next
+          }
+        }
+      } catch {
+        // Discovery optional; handled below if still missing
+      }
+    }
+
+    if (!resolvedPhoneNumberId) {
       return NextResponse.json(
         { error: t('whatsappConfig.credentialsRequired') },
         { status: 400 }
@@ -289,27 +382,25 @@ export async function POST(request: Request) {
     // mistakes (the +phone number, a display name, a URL) here with a
     // named field, instead of letting Meta answer "(#100) Unsupported
     // get request" for a value we could have rejected up front.
-    if (!isNumericMetaId(phone_number_id)) {
+    if (!isNumericMetaId(resolvedPhoneNumberId)) {
       return NextResponse.json(
         {
-          error:
-            t('whatsappConfig.phoneIdDigits'),
+          error: t('whatsappConfig.phoneIdDigits'),
           field: 'phone_number_id',
         },
         { status: 400 }
       )
     }
-    if (waba_id !== undefined && waba_id !== null && waba_id !== '' && !isNumericMetaId(waba_id)) {
+    if (resolvedWabaId !== undefined && resolvedWabaId !== null && resolvedWabaId !== '' && !isNumericMetaId(resolvedWabaId)) {
       return NextResponse.json(
         {
-          error:
-            t('whatsappConfig.wabaIdDigits'),
+          error: t('whatsappConfig.wabaIdDigits'),
           field: 'waba_id',
         },
         { status: 400 }
       )
     }
-    const metaCtx: MetaErrorContext = { phoneNumberId: phone_number_id, wabaId: waba_id || null }
+    const metaCtx: MetaErrorContext = { phoneNumberId: resolvedPhoneNumberId, wabaId: resolvedWabaId || null }
 
     if (pin !== undefined && pin !== null && pin !== '') {
       if (typeof pin !== 'string' || !/^\d{6}$/.test(pin)) {
@@ -317,6 +408,43 @@ export async function POST(request: Request) {
           { error: t('whatsappConfig.pinDigits') },
           { status: 400 }
         )
+      }
+    }
+
+    // Inspect token permissions via debugToken when Meta App credentials exist
+    const appId = (process.env.META_APP_ID || process.env.NEXT_PUBLIC_META_APP_ID || '').trim()
+    const appSecret = (process.env.META_APP_SECRET || process.env.WHATSAPP_APP_SECRET || '').trim()
+    if (appId && appSecret) {
+      try {
+        const tokenData = await debugToken({
+          inputToken: resolvedToken,
+          appId,
+          appSecret,
+        })
+        if (tokenData?.isValid === false) {
+          return NextResponse.json(
+            { error: 'The access token is invalid or expired according to Meta.' },
+            { status: 400 }
+          )
+        }
+        const scopeNames = (tokenData.scopes || []).map((s) => (typeof s === 'string' ? s.trim() : '')).filter(Boolean)
+        const granularScopeNames = (tokenData.granularScopes || []).map((gs) => (typeof gs?.scope === 'string' ? gs.scope.trim() : '')).filter(Boolean)
+        const allScopes = new Set([...scopeNames, ...granularScopeNames])
+        if (allScopes.size > 0) {
+          const required = ['whatsapp_business_management', 'whatsapp_business_messaging']
+          const missing = required.filter((s) => !allScopes.has(s))
+          if (missing.length > 0) {
+            return NextResponse.json(
+              {
+                error: `The provided access token is missing required WhatsApp permissions: ${missing.join(', ')}. Please generate a token with both permissions in Meta Business Suite.`,
+                field: 'access_token',
+              },
+              { status: 400 }
+            )
+          }
+        }
+      } catch (debugErr) {
+        console.warn('[whatsapp/config] debugToken notice:', debugErr instanceof Error ? debugErr.message : debugErr)
       }
     }
 
@@ -330,7 +458,7 @@ export async function POST(request: Request) {
     const { data: claimed, error: claimedError } = await supabaseAdmin()
       .from('whatsapp_config')
       .select('account_id')
-      .eq('phone_number_id', phone_number_id)
+      .eq('phone_number_id', resolvedPhoneNumberId)
       .neq('account_id', accountId)
       .maybeSingle()
 
@@ -345,8 +473,7 @@ export async function POST(request: Request) {
     if (claimed) {
       return NextResponse.json(
         {
-          error:
-            t('whatsappConfig.numberLinkedElsewhere'),
+          error: t('whatsappConfig.numberLinkedElsewhere'),
         },
         { status: 409 }
       )
@@ -356,8 +483,8 @@ export async function POST(request: Request) {
     let phoneInfo
     try {
       phoneInfo = await verifyPhoneNumber({
-        phoneNumberId: phone_number_id,
-        accessToken: access_token,
+        phoneNumberId: resolvedPhoneNumberId,
+        accessToken: resolvedToken,
       })
     } catch (err) {
       return metaFailure(err, 'verify_number', metaCtx)
@@ -367,20 +494,22 @@ export async function POST(request: Request) {
     // user typed. A foreign-but-valid WABA ID used to save fine and
     // subscribe the *wrong* account, surfacing days later as a webhook
     // that never fires. Failing here names the mismatch instead.
-    if (waba_id) {
-      let wabaNumbers
-      try {
-        wabaNumbers = await listWabaPhoneNumbers({
-          wabaId: waba_id,
-          accessToken: access_token,
-        })
-      } catch (err) {
-        return metaFailure(err, 'waba_phone_numbers', metaCtx)
+    if (resolvedWabaId) {
+      let wabaNumbers = fetchedWabaNumbers
+      if (!wabaNumbers) {
+        try {
+          wabaNumbers = await listWabaPhoneNumbers({
+            wabaId: resolvedWabaId,
+            accessToken: resolvedToken,
+          })
+        } catch (err) {
+          return metaFailure(err, 'waba_phone_numbers', metaCtx)
+        }
       }
-      if (!phoneNumberBelongsToWaba(wabaNumbers, phone_number_id)) {
+      if (!phoneNumberBelongsToWaba(wabaNumbers, resolvedPhoneNumberId)) {
         return NextResponse.json(
           {
-            error: describeWabaPhoneMismatch(wabaNumbers, phone_number_id, waba_id),
+            error: describeWabaPhoneMismatch(wabaNumbers, resolvedPhoneNumberId, resolvedWabaId),
             field: 'waba_id',
             meta: {
               code: null,
@@ -396,23 +525,21 @@ export async function POST(request: Request) {
       }
     }
 
-    // Look up any pre-existing row for this account. Two reasons: we need
-    // to know whether this number is already registered with Meta (so we
-    // can skip /register when the user didn't provide a PIN this time
-    // around), and we need the stored verify_token — the settings form
-    // never shows it, so a save that leaves the field blank must keep it
-    // rather than null it out.
-    const { data: existing } = await supabase
-      .from('whatsapp_config')
-      .select('id, registered_at, phone_number_id, verify_token')
-      .eq('account_id', accountId)
-      .maybeSingle()
+    if (validate_only === true) {
+      return NextResponse.json({
+        success: true,
+        valid: true,
+        phone_info: phoneInfo,
+        waba_id: resolvedWabaId || null,
+        phone_number_id: resolvedPhoneNumberId,
+      })
+    }
 
     // Encrypt sensitive tokens before storing
     let encryptedAccessToken: string
     let encryptedVerifyToken: string | null
     try {
-      encryptedAccessToken = encrypt(access_token)
+      encryptedAccessToken = encrypt(resolvedToken)
       encryptedVerifyToken = resolveVerifyTokenForSave(
         verify_token,
         existing?.verify_token ?? null
@@ -430,7 +557,7 @@ export async function POST(request: Request) {
     }
 
     const sameNumber =
-      existing?.phone_number_id === phone_number_id &&
+      existing?.phone_number_id === resolvedPhoneNumberId &&
       existing?.registered_at != null
 
     // Step 1: register the phone number for inbound webhooks.
@@ -443,10 +570,8 @@ export async function POST(request: Request) {
     let registeredAt: string | null = existing?.registered_at ?? null
     let registrationError: string | null = null
     let registrationMeta: ReturnType<typeof metaErrorPayload> | null = null
-    // True when registration was deliberately skipped because no PIN
-    // was supplied (see below). Distinct from registrationError — this
-    // is not a failure, just an incomplete-but-valid save.
-    const registrationSkipped = false
+    let registrationSkipped = false
+    let registrationNotice: string | null = null
 
     const hasPin = typeof pin === 'string' && pin.trim().length > 0
     const isMetaConnected = phoneInfo?.status === 'CONNECTED'
@@ -454,10 +579,11 @@ export async function POST(request: Request) {
 
     if (needsRegistration) {
       if (hasPin) {
+        // Customer provided 2FA PIN: explicitly registering number on Cloud API
         try {
           await registerPhoneNumber({
-            phoneNumberId: phone_number_id,
-            accessToken: access_token,
+            phoneNumberId: resolvedPhoneNumberId,
+            accessToken: resolvedToken,
             pin: pin.trim(),
           })
           registeredAt = new Date().toISOString()
@@ -469,41 +595,25 @@ export async function POST(request: Request) {
           console.error('Phone number /register with PIN failed:', explained.metaMessage, registrationMeta)
         }
       } else if (isMetaConnected) {
+        // Case 1: Already registered Cloud API number.
         // Meta authoritatively confirms the phone number is active and connected on the Cloud API.
-        // For accounts where Meta rolled out the new account model, 2FA PIN is deprecated.
         registeredAt = existing?.registered_at ?? new Date().toISOString()
       } else {
-        // No PIN provided and not yet confirmed CONNECTED on Meta.
-        // Attempt Meta's modern PIN-less registration.
-        try {
-          await registerPhoneNumber({
-            phoneNumberId: phone_number_id,
-            accessToken: access_token,
-          })
-          registeredAt = new Date().toISOString()
-        } catch (err) {
-          const explained = explainMetaError(err, 'register', metaCtx)
-          registrationError = explained.summary
-          registrationMeta = metaErrorPayload(explained)
-          registeredAt = null
-          console.error('Phone number PIN-less /register failed:', explained.metaMessage, registrationMeta)
-        }
+        // Case 2: Number not yet registered with Cloud API and no PIN provided.
+        // DO NOT automatically call POST /{phone-number-id}/register without PIN!
+        // Never call /{phone-number-id}/register without a valid PIN or on an active WhatsApp Business mobile app number.
+        registeredAt = null
+        registrationSkipped = true
+        registrationNotice =
+          'Phone number verified with Meta, but not yet registered for Cloud API messaging. If this number is active on the WhatsApp Business mobile app, registering it with Cloud API requires a 6-digit PIN and will permanently disconnect the mobile app (manual setup does not support Coexistence). If this is a dedicated Cloud API number, enter your 6-digit two-step verification PIN to complete registration.'
       }
     } else if (phoneInfo?.status && phoneInfo.status !== 'CONNECTED') {
       // Local DB had registered_at, but Meta reports the number is no longer connected.
-      // We must not trust the local DB flag alone!
-      try {
-        await registerPhoneNumber({
-          phoneNumberId: phone_number_id,
-          accessToken: access_token,
-        })
-        registeredAt = new Date().toISOString()
-      } catch (err) {
-        const explained = explainMetaError(err, 'register', metaCtx)
-        registrationError = explained.summary
-        registrationMeta = metaErrorPayload(explained)
-        registeredAt = null
-      }
+      // Do NOT blindly attempt PIN-less re-registration.
+      registeredAt = null
+      registrationSkipped = true
+      registrationNotice =
+        'Meta reports this phone number is no longer connected to Cloud API. To re-register it, provide your 6-digit two-step verification PIN.'
     }
 
     // Step 2: subscribe the WABA to this app. Idempotent on Meta's
@@ -518,11 +628,11 @@ export async function POST(request: Request) {
     // has been written yet, so the user just fixes the cause and saves
     // again.
     let subscribedAppsAt: string | null = null
-    if (waba_id) {
+    if (resolvedWabaId) {
       try {
         await subscribeWabaToApp({
-          wabaId: waba_id,
-          accessToken: access_token,
+          wabaId: resolvedWabaId,
+          accessToken: resolvedToken,
         })
         subscribedAppsAt = new Date().toISOString()
       } catch (err) {
@@ -534,8 +644,8 @@ export async function POST(request: Request) {
     // store the credentials and the error so the UI can guide the
     // user through a retry.
     const baseRow = {
-      phone_number_id,
-      waba_id: waba_id || null,
+      phone_number_id: resolvedPhoneNumberId,
+      waba_id: resolvedWabaId || null,
       access_token: encryptedAccessToken,
       verify_token: encryptedVerifyToken,
       status: registrationError ? 'disconnected' : 'connected',
@@ -600,11 +710,8 @@ export async function POST(request: Request) {
       success: true,
       saved: true,
       registered: registeredAt != null,
-      // Credentials are valid and saved, but inbound webhook
-      // registration was skipped because no PIN was supplied (e.g. a
-      // Meta test number). The UI shows the "Not registered" banner
-      // rather than claiming the number is fully live.
       registration_skipped: registrationSkipped,
+      notice: registrationNotice,
       phone_info: phoneInfo,
     })
   } catch (error) {

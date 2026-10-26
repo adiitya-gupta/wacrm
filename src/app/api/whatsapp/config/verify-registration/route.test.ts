@@ -131,7 +131,7 @@ describe('GET /api/whatsapp/config/verify-registration', () => {
     expect(configUpdates[0].status).toBe('connected')
   })
 
-  it('performs PIN-less registration and succeeds when Meta status is not CONNECTED', async () => {
+  it('does NOT automatically call registerPhoneNumber and reports not live when Meta status is not CONNECTED', async () => {
     storedConfig = { ...STORED_CONFIG, registered_at: null }
     meta.verifyPhoneNumber.mockResolvedValueOnce({
       id: '111222333',
@@ -139,22 +139,20 @@ describe('GET /api/whatsapp/config/verify-registration', () => {
       verified_name: 'Acme Support',
       status: 'PENDING',
     })
-    meta.registerPhoneNumber.mockResolvedValueOnce({ success: true, alreadyRegistered: false })
 
     const res = await GET()
     const body = await res.json()
 
     expect(res.status).toBe(200)
-    expect(body.live).toBe(true)
-    expect(meta.registerPhoneNumber).toHaveBeenCalledWith({
-      phoneNumberId: '111222333',
-      accessToken: 'plaintext-token',
-    })
-    expect(configUpdates).toHaveLength(1)
-    expect(configUpdates[0].registered_at).toBeDefined()
+    expect(body.live).toBe(false)
+    expect(meta.registerPhoneNumber).not.toHaveBeenCalled()
+    expect(body.checks.locally_marked_registered).toBe(false)
+    expect(body.errors).toEqual(
+      expect.arrayContaining([expect.stringMatching(/not registered on Cloud API/i)]),
+    )
   })
 
-  it('does NOT trust local DB flag alone when Meta reports status DISCONNECTED and registration fails', async () => {
+  it('does NOT trust local DB flag alone when Meta reports status DISCONNECTED', async () => {
     // Local DB previously had registered_at set
     storedConfig = { ...STORED_CONFIG, registered_at: '2026-01-01T00:00:00.000Z' }
     meta.verifyPhoneNumber.mockResolvedValueOnce({
@@ -163,24 +161,19 @@ describe('GET /api/whatsapp/config/verify-registration', () => {
       verified_name: 'Acme Support',
       status: 'DISCONNECTED',
     })
-    meta.registerPhoneNumber.mockRejectedValueOnce({
-      name: 'MetaApiError',
-      message: 'Two-step verification PIN required.',
-      code: 133007,
-    })
 
     const res = await GET()
     const body = await res.json()
 
     expect(res.status).toBe(200)
     expect(body.live).toBe(false)
+    expect(meta.registerPhoneNumber).not.toHaveBeenCalled()
     expect(body.checks.locally_marked_registered).toBe(false)
     expect(body.errors).toEqual(
-      expect.arrayContaining([expect.stringMatching(/two-step verification PIN/i)]),
+      expect.arrayContaining([expect.stringMatching(/not registered on Cloud API/i)]),
     )
     expect(configUpdates).toHaveLength(1)
     expect(configUpdates[0].registered_at).toBeNull()
-    expect(configUpdates[0].last_registration_error).toMatch(/two-step verification PIN/i)
   })
 
   it('fails with live=false and surfaces WABA subscription error when no apps are subscribed', async () => {

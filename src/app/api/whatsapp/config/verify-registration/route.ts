@@ -3,7 +3,6 @@ import { createClient } from '@/lib/supabase/server'
 import { decrypt } from '@/lib/whatsapp/encryption'
 import {
   getSubscribedApps,
-  registerPhoneNumber,
   verifyPhoneNumber,
   type MetaPhoneInfo,
 } from '@/lib/whatsapp/meta-api'
@@ -144,42 +143,26 @@ export async function GET() {
       config.registered_at = now
       config.last_registration_error = null
     }
-  } else if (checks.phone_metadata_ok) {
-    // If Meta returns a known non-CONNECTED status (e.g. DISCONNECTED, PENDING),
-    // or if registration is incomplete, attempt PIN-less registration.
-    try {
-      await registerPhoneNumber({
-        phoneNumberId: config.phone_number_id,
-        accessToken,
-      })
-      isRegistered = true
-      const now = new Date().toISOString()
-      await supabase
-        .from('whatsapp_config')
-        .update({
-          registered_at: now,
-          status: 'connected',
-          last_registration_error: null,
-        })
-        .eq('account_id', accountId)
-      config.registered_at = now
-      config.last_registration_error = null
-    } catch (regErr) {
-      isRegistered = false
-      const explained = explainMetaError(regErr, 'register', metaCtx)
-      errors.push(explained.summary)
+  } else {
+    // Phone number is not confirmed CONNECTED on Meta Cloud API.
+    // We must NOT call registerPhoneNumber automatically without a PIN here:
+    // 1. Meta rejects PIN-less registration with (#100) The parameter pin is required.
+    // 2. Calling /register on an active WhatsApp Business mobile app number
+    //    deregisters the mobile app and erases chat sessions.
+    isRegistered = false
+    errors.push(
+      `Phone number is not registered on Cloud API (status: ${phoneInfo?.status || 'UNKNOWN'}). If this number is active on the WhatsApp Business mobile app, Cloud API registration requires a 6-digit PIN and will disconnect the mobile app.`,
+    )
+    if (config.registered_at) {
       await supabase
         .from('whatsapp_config')
         .update({
           registered_at: null,
-          last_registration_error: explained.summary,
+          last_registration_error: 'Not registered with Cloud API on Meta',
         })
         .eq('account_id', accountId)
       config.registered_at = null
-      config.last_registration_error = explained.summary
     }
-  } else {
-    isRegistered = false
   }
 
   checks.locally_marked_registered = isRegistered

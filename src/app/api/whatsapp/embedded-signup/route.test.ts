@@ -418,6 +418,48 @@ describe('POST /api/whatsapp/embedded-signup', () => {
       expect(json.success).toBe(true);
     });
 
+    it('connects successfully and does not return missing-permissions error when both permissions exist in both scopes and granularScopes', async () => {
+      setupAuthMock('admin');
+
+      vi.spyOn(metaApi, 'exchangeOAuthCode').mockResolvedValue({
+        accessToken: 'EAAB_user_token_all_true',
+        tokenType: 'bearer',
+      });
+      vi.spyOn(metaApi, 'debugToken').mockResolvedValue({
+        isValid: true,
+        expiresAt: 0,
+        scopes: ['whatsapp_business_management', 'whatsapp_business_messaging'],
+        granularScopes: [
+          { scope: 'whatsapp_business_management', targetIds: ['99912345678'] },
+          { scope: 'whatsapp_business_messaging', targetIds: ['99912345678'] },
+        ],
+      });
+      vi.spyOn(metaApi, 'listWabaPhoneNumbers').mockResolvedValue([
+        { id: '11112345678', display_phone_number: '+1 555-0199' },
+      ]);
+      vi.spyOn(metaApi, 'verifyPhoneNumber').mockResolvedValue({
+        id: '11112345678',
+        display_phone_number: '+1 555-0199',
+      });
+      vi.spyOn(metaApi, 'subscribeWabaToApp').mockResolvedValue();
+
+      const req = new Request('http://localhost/api/whatsapp/embedded-signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          code: 'valid_code',
+          waba_id: '99912345678',
+          phone_number_id: '11112345678',
+        }),
+      });
+
+      const res = await POST(req);
+      expect(res.status).toBe(200);
+      const json = await res.json();
+      expect(json.success).toBe(true);
+      expect(json.missing_scopes).toBeUndefined();
+    });
+
     it('returns 400 when whatsapp_business_management is missing from both scopes and granular_scopes', async () => {
       setupAuthMock('admin');
 
@@ -1009,6 +1051,125 @@ describe('POST /api/whatsapp/embedded-signup', () => {
     const json = await res.json();
     expect(json.error).toMatch(/No phone numbers found under the selected WhatsApp Business Account/i);
     expect(json.error).toMatch(/Unsupported WhatsApp business account type/i);
+  });
+
+  it('returns 400 when listWabaPhoneNumbers fails with Meta API error (instructing user to verify Meta permissions)', async () => {
+    setupAuthMock('admin');
+
+    vi.spyOn(metaApi, 'exchangeOAuthCode').mockResolvedValue({
+      accessToken: 'EAAB_token_list_fail',
+      tokenType: 'bearer',
+    });
+
+    vi.spyOn(metaApi, 'debugToken').mockResolvedValue({
+      isValid: true,
+      scopes: ['whatsapp_business_management', 'whatsapp_business_messaging'],
+      granularScopes: [{ scope: 'whatsapp_business_management', targetIds: ['444555666'] }],
+    });
+
+    vi.spyOn(metaApi, 'listWabaPhoneNumbers').mockRejectedValue(
+      new Error('Meta Graph API permission denied on object')
+    );
+
+    const req = new Request('http://localhost/api/whatsapp/embedded-signup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        code: 'code_list_fail',
+        waba_id: '444555666',
+      }),
+    });
+
+    const res = await POST(req);
+    expect(res.status).toBe(400);
+
+    const json = await res.json();
+    expect(json.error).toMatch(/Could not list phone numbers for WhatsApp Business Account 444555666/i);
+    expect(json.error).toMatch(/Please verify your Meta permissions/i);
+  });
+
+  it('returns 400 when verifyPhoneNumber fails with Meta Cloud API error', async () => {
+    setupAuthMock('admin');
+
+    vi.spyOn(metaApi, 'exchangeOAuthCode').mockResolvedValue({
+      accessToken: 'EAAB_token_verify_fail',
+      tokenType: 'bearer',
+    });
+
+    vi.spyOn(metaApi, 'debugToken').mockResolvedValue({
+      isValid: true,
+      scopes: ['whatsapp_business_management', 'whatsapp_business_messaging'],
+      granularScopes: [{ scope: 'whatsapp_business_management', targetIds: ['444555666'] }],
+    });
+
+    vi.spyOn(metaApi, 'listWabaPhoneNumbers').mockResolvedValue([
+      { id: '111222333', display_phone_number: '+1 555-0100' },
+    ]);
+
+    vi.spyOn(metaApi, 'verifyPhoneNumber').mockRejectedValue(
+      new Error('Meta Graph API phone verification failed')
+    );
+
+    const req = new Request('http://localhost/api/whatsapp/embedded-signup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        code: 'code_verify_fail',
+        waba_id: '444555666',
+        phone_number_id: '111222333',
+      }),
+    });
+
+    const res = await POST(req);
+    expect(res.status).toBe(400);
+
+    const json = await res.json();
+    expect(json.error).toMatch(/Could not verify the selected phone number with Meta Cloud API/i);
+  });
+
+  it('returns 502 when subscribeWabaToApp fails to subscribe webhook', async () => {
+    setupAuthMock('admin');
+
+    vi.spyOn(metaApi, 'exchangeOAuthCode').mockResolvedValue({
+      accessToken: 'EAAB_token_sub_fail',
+      tokenType: 'bearer',
+    });
+
+    vi.spyOn(metaApi, 'debugToken').mockResolvedValue({
+      isValid: true,
+      scopes: ['whatsapp_business_management', 'whatsapp_business_messaging'],
+      granularScopes: [{ scope: 'whatsapp_business_management', targetIds: ['444555666'] }],
+    });
+
+    vi.spyOn(metaApi, 'listWabaPhoneNumbers').mockResolvedValue([
+      { id: '111222333', display_phone_number: '+1 555-0100' },
+    ]);
+
+    vi.spyOn(metaApi, 'verifyPhoneNumber').mockResolvedValue({
+      id: '111222333',
+      display_phone_number: '+1 555-0100',
+      status: 'CONNECTED',
+    });
+
+    vi.spyOn(metaApi, 'subscribeWabaToApp').mockRejectedValue(
+      new Error('Meta webhook subscription failure')
+    );
+
+    const req = new Request('http://localhost/api/whatsapp/embedded-signup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        code: 'code_sub_fail',
+        waba_id: '444555666',
+        phone_number_id: '111222333',
+      }),
+    });
+
+    const res = await POST(req);
+    expect(res.status).toBe(502);
+
+    const json = await res.json();
+    expect(json.error).toMatch(/Could not subscribe WhatsApp Business Account to the platform app/i);
   });
 
   it('preserves strict tenant isolation and persists credentials only under authenticated accountId', async () => {

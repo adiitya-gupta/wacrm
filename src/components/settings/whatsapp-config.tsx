@@ -13,6 +13,16 @@ import {
   Zap,
   AlertTriangle,
   RotateCcw,
+  Smartphone,
+  KeyRound,
+  Pencil,
+  Check,
+  Send,
+  RefreshCw,
+  Trash2,
+  HelpCircle,
+  ShieldCheck,
+  Radio,
 } from 'lucide-react';
 import { createClient } from '@/lib/supabase/client';
 import { useAuth } from '@/hooks/use-auth';
@@ -20,9 +30,11 @@ import { useTranslations } from 'next-intl';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Textarea } from '@/components/ui/textarea';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Switch } from '@/components/ui/switch';
+import { Badge } from '@/components/ui/badge';
 import { SettingsPanelHead } from './settings-panel-head';
 import {
   Accordion,
@@ -30,7 +42,14 @@ import {
   AccordionTrigger,
   AccordionContent,
 } from '@/components/ui/accordion';
-import { launchEmbeddedSignup } from '@/lib/whatsapp/embedded-signup';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import type { WhatsAppConfig as WhatsAppConfigType } from '@/types';
 
 const MASKED_TOKEN = '••••••••••••••••';
@@ -38,13 +57,8 @@ const MASKED_TOKEN = '••••••••••••••••';
 type ConnectionStatus = 'connected' | 'disconnected' | 'unknown';
 type ResetReason = 'token_corrupted' | 'meta_api_error' | null;
 
-// Meta ids are decimal digit strings — mirrors the server-side check in
-// POST /api/whatsapp/config so the obvious paste mistakes get a named
-// field before a round-trip.
 const META_ID_RE = /^\d+$/;
 
-// `meta` object the config route attaches to every failed Meta call
-// (issue #505): what a user quotes to Meta support.
 type MetaErrorMeta = {
   code: number | null;
   subcode: number | null;
@@ -61,14 +75,26 @@ type WabaSubscription = {
   error?: string;
 };
 
+type PhoneInfo = {
+  id?: string;
+  display_phone_number?: string;
+  verified_name?: string;
+  quality_rating?: string;
+  status?: string;
+};
+
+type RegistrationProbe = {
+  live: boolean;
+  checks: Record<string, boolean | null>;
+  errors?: string[];
+  last_registration_error?: string | null;
+  registered_at?: string | null;
+  subscribed_apps_at?: string | null;
+};
+
 export function WhatsAppConfig() {
   const t = useTranslations('Settings.whatsapp');
   const supabase = createClient();
-  // After multi-user, whatsapp_config is one-row-per-account, not
-  // one-row-per-user. We pull `accountId` straight off the auth
-  // context and key every read off it — so a teammate who just
-  // joined an account sees the inviter's saved config without
-  // having to re-enter anything.
   const {
     user,
     accountId,
@@ -79,7 +105,8 @@ export function WhatsAppConfig() {
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [embeddedConnecting, setEmbeddedConnecting] = useState(false);
+  const [phoneInfo, setPhoneInfo] = useState<PhoneInfo | null>(null);
+  const [isEditingCredentials, setIsEditingCredentials] = useState(false);
   const [testing, setTesting] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [showToken, setShowToken] = useState(false);
@@ -87,53 +114,51 @@ export function WhatsAppConfig() {
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('unknown');
   const [resetReason, setResetReason] = useState<ResetReason>(null);
   const [statusMessage, setStatusMessage] = useState<string>('');
-  // Structured details of the last failed Meta call (health check or
-  // save) — rendered as small muted text under the actionable message.
   const [statusMeta, setStatusMeta] = useState<MetaErrorMeta | null>(null);
   const [saveFailure, setSaveFailure] = useState<MetaFailure | null>(null);
   const [wabaSubscription, setWabaSubscription] = useState<WabaSubscription | null>(null);
-  // Guards against re-hydrating the form when the load effect below
-  // re-runs for reasons unrelated to actually switching accounts —
-  // e.g. Supabase's onAuthStateChange fires a token refresh (new
-  // `user` object, profileLoading flips true/false) when the browser
-  // tab regains focus. Without this, that churn calls fetchConfig()
-  // again and overwrites whatever the user typed but hadn't saved yet.
   const loadedAccountIdRef = useRef<string | null>(null);
 
+  // Form Fields
   const [phoneNumberId, setPhoneNumberId] = useState('');
   const [wabaId, setWabaId] = useState('');
   const [accessToken, setAccessToken] = useState('');
   const [pin, setPin] = useState('');
   const [tokenEdited, setTokenEdited] = useState(false);
 
-  // Inbound-media mirror (issue #466). Unlike everything else on this
-  // page it is NOT part of handleSave: that path insists on re-entering
-  // the access token so it can re-verify with Meta, which is a silly
-  // toll to pay for flipping a boolean. The switch writes straight to
-  // the row instead — RLS (migration 017) restricts whatsapp_config
-  // UPDATE to admins, hence the canEditSettings gate below; without it
-  // a viewer's toggle would match zero rows and appear to work.
+  // Pre-flight Validation
+  const [validating, setValidating] = useState(false);
+  const [validationSuccess, setValidationSuccess] = useState<{
+    phone_info?: PhoneInfo;
+    waba_id?: string | null;
+    phone_number_id?: string | null;
+  } | null>(null);
+
+  // Inbound-media mirror
   const [mirrorMedia, setMirrorMedia] = useState(true);
   const [savingMirror, setSavingMirror] = useState(false);
 
-  // True once /register has succeeded on Meta's side (timestamp set
-  // in the row). When false, the saved config is metadata-only and
-  // Meta will silently drop every inbound event — that's the
-  // multi-number bug that prompted this work.
+  // Registration probe
+  const [verifyingRegistration, setVerifyingRegistration] = useState(false);
+  const [registrationProbe, setRegistrationProbe] = useState<RegistrationProbe | null>(null);
+
+  // Test Message Feature
+  const [showTestMessageCard, setShowTestMessageCard] = useState(false);
+  const [testRecipient, setTestRecipient] = useState('');
+  const [testCustomMessage, setTestCustomMessage] = useState('');
+  const [sendingTestMessage, setSendingTestMessage] = useState(false);
+  const [testMessageResponse, setTestMessageResponse] = useState<{
+    success: boolean;
+    messageId?: string;
+    error?: string;
+    meta?: MetaErrorMeta | null;
+  } | null>(null);
+
+  // Disconnect Confirmation Dialog
+  const [disconnectDialogOpen, setDisconnectDialogOpen] = useState(false);
+
   const isRegistered = Boolean(config?.registered_at) && !config?.last_registration_error;
   const lastRegistrationError = config?.last_registration_error ?? null;
-
-  const [verifyingRegistration, setVerifyingRegistration] = useState(false);
-  type RegistrationProbe = {
-    live: boolean;
-    checks: Record<string, boolean | null>;
-    errors?: string[];
-    last_registration_error?: string | null;
-    registered_at?: string | null;
-    subscribed_apps_at?: string | null;
-  };
-  const [registrationProbe, setRegistrationProbe] =
-    useState<RegistrationProbe | null>(null);
 
   const webhookUrl =
     typeof window !== 'undefined'
@@ -143,12 +168,6 @@ export function WhatsAppConfig() {
   const fetchConfig = useCallback(async (acctId: string) => {
     setLoading(true);
     try {
-      // Load form values from Supabase (shows what's in DB).
-      // Switched from `user_id` (which would only match the row's
-      // original author) to `account_id` so every member of the
-      // account sees the same saved configuration. UNIQUE(account_id)
-      // on the table guarantees the .maybeSingle() return type
-      // remains accurate.
       const { data, error } = await supabase
         .from('whatsapp_config')
         .select('*')
@@ -166,8 +185,6 @@ export function WhatsAppConfig() {
         setAccessToken(MASKED_TOKEN);
         setPin('');
         setTokenEdited(false);
-        // Undefined on a row read before migration 039 — treat that as
-        // on, matching the webhook's own default.
         setMirrorMedia(data.mirror_inbound_media !== false);
       } else {
         setConfig(null);
@@ -178,10 +195,9 @@ export function WhatsAppConfig() {
         setTokenEdited(false);
         setMirrorMedia(true);
       }
-      // Clear any stale probe result when reloading the row.
       setRegistrationProbe(null);
+      setValidationSuccess(null);
 
-      // Then verify health via the API (decrypts token + pings Meta)
       if (data) {
         try {
           const res = await fetch('/api/whatsapp/config', { method: 'GET' });
@@ -193,16 +209,21 @@ export function WhatsAppConfig() {
             setStatusMessage('');
             setStatusMeta(null);
             setWabaSubscription(payload.waba_subscription ?? null);
+            if (payload.phone_info) {
+              setPhoneInfo(payload.phone_info);
+            }
           } else {
             setConnectionStatus('disconnected');
             setResetReason(payload.needs_reset ? 'token_corrupted' : payload.reason === 'meta_api_error' ? 'meta_api_error' : null);
             setStatusMessage(payload.message || '');
             setStatusMeta(payload.meta ?? null);
             setWabaSubscription(null);
+            setPhoneInfo(null);
           }
         } catch (err) {
           console.error('Health check failed:', err);
           setConnectionStatus('disconnected');
+          setPhoneInfo(null);
         }
       } else {
         setConnectionStatus('disconnected');
@@ -210,6 +231,8 @@ export function WhatsAppConfig() {
         setStatusMessage('');
         setStatusMeta(null);
         setWabaSubscription(null);
+        setPhoneInfo(null);
+        setIsEditingCredentials(false);
       }
     } catch (err) {
       console.error('fetchConfig error:', err);
@@ -220,11 +243,6 @@ export function WhatsAppConfig() {
   }, [supabase, t]);
 
   useEffect(() => {
-    // Need both the auth session (`!authLoading`) AND the profile
-    // (`!profileLoading`, which carries `accountId`). Without the
-    // second guard, the effect would fire with `accountId === null`
-    // for the first render window and bail without ever retrying
-    // once the profile arrives.
     if (authLoading || profileLoading) return;
     if (!user || !accountId) {
       loadedAccountIdRef.current = null;
@@ -238,8 +256,6 @@ export function WhatsAppConfig() {
 
   async function handleToggleMirrorMedia(next: boolean) {
     if (!config || !accountId || savingMirror) return;
-    // Optimistic — the switch should feel instant; a failure rolls it
-    // back rather than leaving the UI ahead of the row.
     const previous = mirrorMedia;
     setMirrorMedia(next);
     setSavingMirror(true);
@@ -259,178 +275,44 @@ export function WhatsAppConfig() {
     }
   }
 
-  async function handleConnectWhatsApp() {
-    if (!canEditSettings) return;
+  // Pre-flight credential validation
+  async function handleValidateCredentials() {
+    const cleanPhone = phoneNumberId.trim();
+    const cleanWaba = wabaId.trim();
+    const cleanToken = accessToken.trim();
 
-    const appId = (
-      process.env.NEXT_PUBLIC_META_APP_ID ||
-      ''
-    ).trim();
-    const configId = (
-      process.env.NEXT_PUBLIC_META_CONFIG_ID ||
-      ''
-    ).trim();
-
-    if (!appId || !configId) {
-      toast.error(
-        t('metaConfigMissing', {
-          defaultMessage:
-            'Meta App ID or Configuration ID is not configured in environment variables.',
-        })
-      );
+    if (!cleanPhone && !cleanWaba) {
+      toast.error('Please enter a Phone Number ID or WABA ID to validate.');
       return;
     }
-
-    setEmbeddedConnecting(true);
-
-    try {
-      await launchEmbeddedSignup({
-        appId,
-        configId,
-        onSuccess: async (auth) => {
-          try {
-            const res = await fetch('/api/whatsapp/embedded-signup', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                code: auth.code,
-                waba_id: auth.wabaId,
-                phone_number_id: auth.phoneNumberId,
-                business_id: auth.businessId,
-              }),
-            });
-
-            const data = await res.json();
-            if (!res.ok) {
-              throw new Error(data.error || 'Failed to exchange token with Meta.');
-            }
-
-            if (data.registered === false || data.registration_error) {
-              toast.warning(
-                data.registration_error
-                  ? `${t('embeddedSignupRegistrationIncomplete', {
-                      defaultMessage: 'WhatsApp credentials connected, but phone registration is incomplete',
-                    })}: ${data.registration_error}`
-                  : t('embeddedSignupRegistrationPending', {
-                      defaultMessage:
-                        'WhatsApp credentials connected, but phone registration is pending. Please verify registration.',
-                    }),
-                { duration: 8000 }
-              );
-            } else {
-              toast.success(
-                t('embeddedSignupSuccess', {
-                  defaultMessage: 'WhatsApp account connected successfully.',
-                })
-              );
-            }
-
-            if (accountId) {
-              await fetchConfig(accountId);
-            }
-          } catch (exchangeErr) {
-            console.error('Embedded signup exchange failed:', exchangeErr);
-            toast.error(
-              exchangeErr instanceof Error
-                ? exchangeErr.message
-                : 'Failed to connect WhatsApp account'
-            );
-          } finally {
-            setEmbeddedConnecting(false);
-          }
-        },
-        onCancel: (details) => {
-          setEmbeddedConnecting(false);
-          if (
-            details?.currentStep === 'WABA_PHONE_PROFILE_PICKER' ||
-            details?.currentStep === 'BUSINESS_ACCOUNT_SELECTION'
-          ) {
-            toast.error(
-              t('embeddedSignupAccountTypeCancelled', {
-                defaultMessage:
-                  'WhatsApp setup was cancelled or closed during account selection. If Meta displayed "Unsupported WhatsApp business account type", please ensure you choose a valid Meta Business Portfolio and select or create a Cloud API WhatsApp account (not a personal or unsupported account type).',
-              }),
-              { duration: 8000 }
-            );
-          } else {
-            toast.info(
-              t('embeddedSignupCancelled', {
-                defaultMessage: 'WhatsApp Embedded Signup was cancelled.',
-              })
-            );
-          }
-        },
-        onError: (err, details) => {
-          setEmbeddedConnecting(false);
-          console.error('Embedded signup error:', err);
-          const msg = err.message || '';
-          if (
-            msg.toLowerCase().includes('account type') ||
-            details?.currentStep === 'WABA_PHONE_PROFILE_PICKER'
-          ) {
-            toast.error(
-              t('embeddedSignupAccountTypeError', {
-                defaultMessage:
-                  'Meta reported an unsupported account type. Please ensure you select a valid Meta Business Portfolio and create or choose a Cloud API WhatsApp account.',
-              }),
-              { duration: 8000 }
-            );
-          } else {
-            toast.error(msg || 'WhatsApp Embedded Signup encountered an error');
-          }
-        },
-      });
-    } catch (err) {
-      setEmbeddedConnecting(false);
-      console.error('Failed to launch Embedded Signup:', err);
-      toast.error(err instanceof Error ? err.message : 'Failed to launch Embedded Signup');
-    }
-  }
-
-  async function handleSave() {
-    if (!phoneNumberId.trim()) {
-      toast.error(t('phoneNumberIdRequired'));
-      return;
-    }
-    if (!META_ID_RE.test(phoneNumberId.trim())) {
+    if (cleanPhone && !META_ID_RE.test(cleanPhone)) {
       toast.error(t('phoneNumberIdNotNumeric'));
       return;
     }
-    if (wabaId.trim() && !META_ID_RE.test(wabaId.trim())) {
+    if (cleanWaba && !META_ID_RE.test(cleanWaba)) {
       toast.error(t('wabaIdNotNumeric'));
       return;
     }
-    if (!config && (!accessToken.trim() || !tokenEdited)) {
+    if (!config && (!cleanToken || cleanToken === MASKED_TOKEN)) {
       toast.error(t('accessTokenRequired'));
       return;
     }
 
     try {
-      setSaving(true);
+      setValidating(true);
+      setValidationSuccess(null);
+      setSaveFailure(null);
 
-      // Always POST through the API — it verifies with Meta and encrypts
-      // the access_token server-side with ENCRYPTION_KEY. Skipping this
-      // and writing direct to Supabase stores the token in plaintext,
-      // which then fails decryption on every subsequent health check.
       const payload: Record<string, unknown> = {
-        phone_number_id: phoneNumberId.trim(),
-        waba_id: wabaId.trim() || null,
-        // Optional — only sent when the user filled it in. The server
-        // requires it on first save or when changing numbers; for a
-        // simple token rotation, leaving it blank skips re-register.
-        pin: pin.trim() || null,
+        phone_number_id: cleanPhone || null,
+        waba_id: cleanWaba || null,
+        validate_only: true,
       };
 
-      if (tokenEdited && accessToken !== MASKED_TOKEN && accessToken.trim()) {
-        payload.access_token = accessToken.trim();
-      } else if (config) {
-        // Existing config — reuse stored encrypted token by decrypting on the
-        // server. But our POST handler requires an access_token to verify
-        // with Meta. If the user didn't change the token, we need to signal
-        // that. Simplest: require token re-entry if they're updating.
-        toast.error(t('reenterAccessToken'));
-        setSaving(false);
-        return;
+      if (tokenEdited && cleanToken && cleanToken !== MASKED_TOKEN) {
+        payload.access_token = cleanToken;
+      } else if (!config) {
+        payload.access_token = cleanToken;
       }
 
       const res = await fetch('/api/whatsapp/config', {
@@ -442,9 +324,81 @@ export function WhatsAppConfig() {
       const data = await res.json();
 
       if (!res.ok) {
-        // The route names the failing step and which field to check
-        // (issue #505). Keep the details on screen — a toast is too
-        // short-lived to copy a trace id out of.
+        setSaveFailure({
+          message: data.error || 'Credential validation failed',
+          meta: data.meta ?? null,
+        });
+        toast.error(data.error || 'Validation failed', { duration: 8000 });
+        return;
+      }
+
+      setValidationSuccess({
+        phone_info: data.phone_info,
+        waba_id: data.waba_id,
+        phone_number_id: data.phone_number_id,
+      });
+
+      const verifiedDisplayName = data.phone_info?.verified_name || data.phone_info?.display_phone_number || 'Business Account';
+      toast.success(`Validated successfully! Connected to: ${verifiedDisplayName}`);
+    } catch (err) {
+      console.error('Validation error:', err);
+      toast.error('Failed to communicate with Meta API');
+    } finally {
+      setValidating(false);
+    }
+  }
+
+  async function handleSave() {
+    const cleanPhone = phoneNumberId.trim();
+    const cleanWaba = wabaId.trim();
+    const cleanToken = accessToken.trim();
+
+    if (!cleanPhone && !cleanWaba) {
+      toast.error(
+        t('phoneNumberOrWabaRequired', {
+          defaultMessage:
+            'Please provide either a Phone Number ID or a WhatsApp Business Account ID (WABA ID).',
+        })
+      );
+      return;
+    }
+    if (cleanPhone && !META_ID_RE.test(cleanPhone)) {
+      toast.error(t('phoneNumberIdNotNumeric'));
+      return;
+    }
+    if (cleanWaba && !META_ID_RE.test(cleanWaba)) {
+      toast.error(t('wabaIdNotNumeric'));
+      return;
+    }
+    if (!config && (!cleanToken || cleanToken === MASKED_TOKEN)) {
+      toast.error(t('accessTokenRequired'));
+      return;
+    }
+
+    try {
+      setSaving(true);
+
+      const payload: Record<string, unknown> = {
+        phone_number_id: cleanPhone || null,
+        waba_id: cleanWaba || null,
+        pin: pin.trim() || null,
+      };
+
+      if (tokenEdited && cleanToken && cleanToken !== MASKED_TOKEN) {
+        payload.access_token = cleanToken;
+      } else if (!config) {
+        payload.access_token = cleanToken;
+      }
+
+      const res = await fetch('/api/whatsapp/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
         setSaveFailure({
           message: data.error || t('saveFailed'),
           meta: data.meta ?? null,
@@ -455,12 +409,12 @@ export function WhatsAppConfig() {
       }
       setSaveFailure(null);
 
-      // The route now returns a structured outcome:
-      //   * registered=true   → number is live, events will flow
-      //   * registered=false  → credentials saved but /register
-      //                         failed; UI shows the specific error
-      //                         and a retry path. registration_error
-      //                         is human-readable from Meta.
+      if (data.phone_info) {
+        setPhoneInfo(data.phone_info);
+      }
+      setIsEditingCredentials(false);
+      setValidationSuccess(null);
+
       if (data.registered === false && data.registration_error) {
         setSaveFailure({
           message: t('savedButRegistrationFailed', { error: data.registration_error }),
@@ -471,12 +425,8 @@ export function WhatsAppConfig() {
           { duration: 12000 },
         );
       } else if (data.registration_skipped) {
-        // Credentials saved + verified, but /register was skipped
-        // because no PIN was supplied (e.g. a Meta test number).
-        // Don't claim the number is "Live" — point at the
-        // Registration status banner instead.
         toast.success(
-          t('savedRegistrationSkipped'),
+          data.notice || t('savedRegistrationSkipped'),
           { duration: 10000 },
         );
         setPin('');
@@ -486,9 +436,6 @@ export function WhatsAppConfig() {
             ? t('liveWithName', { name: data.phone_info.verified_name })
             : t('connectedGeneric'),
         );
-        // Clear the PIN so subsequent saves don't accidentally
-        // re-register (which would void the active subscription if
-        // the PIN became stale).
         setPin('');
       }
 
@@ -513,6 +460,9 @@ export function WhatsAppConfig() {
         setStatusMessage('');
         setStatusMeta(null);
         setWabaSubscription(payload.waba_subscription ?? null);
+        if (payload.phone_info) {
+          setPhoneInfo(payload.phone_info);
+        }
         toast.success(
           payload.phone_info?.verified_name
             ? t('connectedTo', { name: payload.phone_info.verified_name })
@@ -535,6 +485,51 @@ export function WhatsAppConfig() {
     }
   }
 
+  async function handleSendTestMessage() {
+    const cleanPhone = testRecipient.trim();
+    if (!cleanPhone) {
+      toast.error('Please enter a recipient phone number with country code (e.g. +1234567890).');
+      return;
+    }
+
+    try {
+      setSendingTestMessage(true);
+      setTestMessageResponse(null);
+
+      const res = await fetch('/api/whatsapp/config/test-message', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          to: cleanPhone,
+          message: testCustomMessage.trim() || undefined,
+        }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok || !data.success) {
+        setTestMessageResponse({
+          success: false,
+          error: data.error || 'Failed to send test message',
+          meta: data.meta ?? null,
+        });
+        toast.error(data.error || 'Test message failed', { duration: 8000 });
+        return;
+      }
+
+      setTestMessageResponse({
+        success: true,
+        messageId: data.message_id,
+      });
+      toast.success('Test message sent successfully!');
+    } catch (err) {
+      console.error('Test message send error:', err);
+      toast.error('Failed to communicate with test message endpoint');
+    } finally {
+      setSendingTestMessage(false);
+    }
+  }
+
   async function handleVerifyRegistration() {
     setVerifyingRegistration(true);
     setRegistrationProbe(null);
@@ -547,10 +542,7 @@ export function WhatsAppConfig() {
       if (data.live) {
         toast.success(t('fullyWired'));
       } else {
-        toast.error(
-          t('notFullyRegistered'),
-          { duration: 8000 },
-        );
+        toast.error(t('notFullyRegistered'), { duration: 8000 });
       }
       if (accountId) await fetchConfig(accountId);
     } catch (err) {
@@ -561,11 +553,7 @@ export function WhatsAppConfig() {
     }
   }
 
-  async function handleReset() {
-    if (!confirm(t('resetConfirm'))) {
-      return;
-    }
-
+  async function handleDisconnectConfirm() {
     try {
       setResetting(true);
       const res = await fetch('/api/whatsapp/config', { method: 'DELETE' });
@@ -576,7 +564,7 @@ export function WhatsAppConfig() {
         return;
       }
 
-      toast.success(t('resetDone'));
+      toast.success('WhatsApp integration disconnected successfully.');
       setConfig(null);
       setPhoneNumberId('');
       setWabaId('');
@@ -588,8 +576,13 @@ export function WhatsAppConfig() {
       setStatusMeta(null);
       setSaveFailure(null);
       setWabaSubscription(null);
+      setPhoneInfo(null);
+      setIsEditingCredentials(false);
+      setValidationSuccess(null);
+      setShowTestMessageCard(false);
+      setDisconnectDialogOpen(false);
     } catch (err) {
-      console.error('Reset error:', err);
+      console.error('Disconnect error:', err);
       toast.error(t('resetFailed'));
     } finally {
       setResetting(false);
@@ -617,9 +610,6 @@ export function WhatsAppConfig() {
 
   const showResetBanner = resetReason === 'token_corrupted';
 
-  // Step + code + trace id in small muted text, so a user can quote
-  // them to Meta support (issue #505). The step names are wire values
-  // from the route, shown verbatim.
   const renderMetaDetails = (meta: MetaErrorMeta) => (
     <div className="mt-2 space-y-0.5 text-[11px] leading-relaxed text-muted-foreground break-all">
       <p>
@@ -657,583 +647,1023 @@ export function WhatsAppConfig() {
         description={t("description")}
       />
       <div className="grid gap-6 lg:grid-cols-[1fr_380px]">
-      {/* Main config form */}
-      <div className="space-y-6">
-        {/* Corrupted-token reset banner */}
-        {showResetBanner && (
-          <Alert className="bg-amber-950/40 border-amber-600/40">
-            <div className="flex items-start gap-3">
-              <AlertTriangle className="size-5 text-amber-400 mt-0.5 shrink-0" />
-              <div className="flex-1">
-                <AlertTitle className="text-amber-200 mb-1">
-                  {t('tokenCorrupted')}
-                </AlertTitle>
-                <AlertDescription className="text-amber-100/80 text-sm">
-                  {statusMessage}
-                </AlertDescription>
-                <Button
-                  onClick={handleReset}
-                  disabled={resetting}
-                  size="sm"
-                  className="mt-3 bg-amber-600 hover:bg-amber-700 text-white"
-                >
-                  {resetting ? (
-                    <>
-                      <Loader2 className="size-4 animate-spin" />
-                      {t('resetting')}
-                    </>
-                  ) : (
-                    <>
-                      <RotateCcw className="size-4" />
-                      {t('resetConfig')}
-                    </>
-                  )}
-                </Button>
-              </div>
-            </div>
-          </Alert>
-        )}
-
-        {/* Last save failed — why, which field, and what to quote to Meta */}
-        {saveFailure && (
-          <Alert className="bg-[#FEE2E2] border-[#FECACA]">
-            <div className="flex items-start gap-3">
-              <XCircle className="size-5 text-[#B91C1C] mt-0.5 shrink-0" />
-              <div className="flex-1 min-w-0">
-                <AlertTitle className="text-[#B91C1C] font-semibold mb-1">{t('lastSaveFailed')}</AlertTitle>
-                <AlertDescription className="text-[#B91C1C]/90 text-sm">
-                  {saveFailure.message}
-                </AlertDescription>
-                {saveFailure.meta && renderMetaDetails(saveFailure.meta)}
-              </div>
-            </div>
-          </Alert>
-        )}
-
-        {/* Connection Status */}
-        <Alert className="bg-card border-border">
-          <div className="flex items-center gap-2">
-            {connectionStatus === 'connected' ? (
-              <CheckCircle2 className="size-4 text-primary" />
-            ) : (
-              <XCircle className="size-4 text-red-500" />
-            )}
-            <AlertTitle className="text-foreground mb-0">
-              {connectionStatus === 'connected' ? t('credentialsValid') : t('notConnected')}
-            </AlertTitle>
-          </div>
-          <AlertDescription className="text-muted-foreground">
-            {connectionStatus === 'connected'
-              ? t('connectedDesc')
-              : statusMessage ||
-                t('notConnectedDesc')}
-          </AlertDescription>
-          {connectionStatus === 'connected' && wabaSubscription?.checked && (
-            <p
-              className={
-                'mt-1 text-xs ' +
-                (wabaSubscription.subscribed === false
-                  ? 'text-amber-300'
-                  : 'text-muted-foreground')
-              }
-            >
-              {wabaSubscription.subscribed === false
-                ? t('wabaNotSubscribed')
-                : wabaSubscription.subscribed === true
-                  ? t('wabaSubscribed')
-                  : wabaSubscription.error}
-            </p>
-          )}
-          {connectionStatus !== 'connected' && statusMeta && renderMetaDetails(statusMeta)}
-        </Alert>
-
-        {/* Registration Status — the "is it actually live?" check.
-            Credentials being valid is necessary but not sufficient;
-            without a successful /register call the number won't
-            receive inbound events. Surface this dimension separately
-            so users don't trust a misleading green banner. */}
-        {config && (
-          <Alert
-            className={
-              isRegistered
-                ? 'bg-[#DCFCE7] border-[#BBF7D0]'
-                : 'bg-[#FEF3C7] border-[#FDE68A]'
-            }
-          >
-            <div className="flex items-center justify-between gap-2 flex-wrap">
-              <div className="flex items-center gap-2">
-                {isRegistered ? (
-                  <CheckCircle2 className="size-4 text-[#15803D]" />
-                ) : (
-                  <AlertTriangle className="size-4 text-[#B45309]" />
-                )}
-                <AlertTitle
-                  className={
-                    'mb-0 font-semibold ' + (isRegistered ? 'text-[#15803D]' : 'text-[#B45309]')
-                  }
-                >
-                  {isRegistered
-                    ? t('registered')
-                    : t('notRegistered')}
-                </AlertTitle>
-              </div>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleVerifyRegistration}
-                disabled={verifyingRegistration}
-                className="border-border bg-card text-foreground hover:bg-muted h-7 shadow-xs"
-              >
-                {verifyingRegistration ? (
-                  <Loader2 className="size-3.5 animate-spin" />
-                ) : (
-                  <Zap className="size-3.5" />
-                )}
-                {t('verifyWithMeta')}
-              </Button>
-            </div>
-            <AlertDescription className="text-secondary-text mt-2 text-xs leading-relaxed">
-              {isRegistered ? (
-                <span
-                  dangerouslySetInnerHTML={{
-                    __html: t('subscribedSince', {
-                      date: config.registered_at
-                        ? new Date(config.registered_at).toLocaleString()
-                        : t('unknownDate'),
-                    }),
-                  }}
-                />
-              ) : lastRegistrationError ? (
-                <>
-                  {t('lastAttemptFailed')}
-                  <span className="text-[#B91C1C] font-medium">
-                    &quot;{lastRegistrationError}&quot;
-                  </span>
-                  . {t('retryHint')}
-                </>
-              ) : (
-                <>{t('noRegistrationHint')}</>
-              )}
-            </AlertDescription>
-
-            {registrationProbe && (
-              <div className="mt-3 rounded border border-border bg-card px-3 py-2 space-y-1.5 text-[11px] shadow-xs">
-                <p className="font-medium text-foreground">
-                  {t('diagnosticLastRun')}{' '}
-                  <span className={registrationProbe.live ? 'text-[#15803D] font-semibold' : 'text-[#B45309] font-semibold'}>
-                    {registrationProbe.live ? t('live') : t('notLive')}
-                  </span>
-                </p>
-                <ul className="space-y-0.5 text-secondary-text">
-                  {Object.entries(registrationProbe.checks).map(([k, v]) => (
-                    <li key={k} className="flex items-center gap-1.5">
-                      {v === true ? (
-                        <CheckCircle2 className="size-3 text-[#15803D] shrink-0" />
-                      ) : v === false ? (
-                        <XCircle className="size-3 text-[#B91C1C] shrink-0" />
-                      ) : (
-                        <span className="size-3 rounded-full border border-border shrink-0" />
-                      )}
-                      <code className="text-muted-foreground">{k}</code>
-                    </li>
-                  ))}
-                </ul>
-                {(registrationProbe.errors ?? []).length > 0 && (
-                  <ul className="pt-1 space-y-0.5 text-[#B91C1C]">
-                    {registrationProbe.errors?.map((e, i) => (
-                      <li key={i}>• {e}</li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-            )}
-          </Alert>
-        )}
-
-        {/* One-Click Meta WhatsApp Embedded Signup */}
-        <Card className="border-emerald-500/30 bg-emerald-50/40 dark:bg-emerald-950/20 shadow-xs">
-          <CardHeader>
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2.5">
-                <div className="flex size-9 items-center justify-center rounded-lg bg-emerald-600 text-white shadow-xs">
-                  <Zap className="size-4" />
-                </div>
-                <div>
-                  <CardTitle className="text-foreground text-base">
-                    {t('embeddedSignupTitle', { defaultMessage: 'One-Click WhatsApp Setup' })}
-                  </CardTitle>
-                  <CardDescription className="text-muted-foreground text-xs">
-                    {t('embeddedSignupDesc', {
-                      defaultMessage:
-                        'Connect your WhatsApp Business number automatically with Meta Embedded Signup in seconds without manually copying tokens.',
-                    })}
-                  </CardDescription>
-                </div>
-              </div>
-              <span className="inline-flex items-center rounded-full bg-emerald-500/10 px-2.5 py-0.5 text-xs font-semibold text-emerald-700 dark:text-emerald-400 border border-emerald-500/20">
-                Recommended
-              </span>
-            </div>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <p className="text-xs text-muted-foreground leading-relaxed">
-              Log in with Facebook to select your WhatsApp Business Account and phone number. Wattomation will automatically link the account, grant required permissions, and subscribe webhooks.
-            </p>
-
-            <div className="flex flex-wrap items-center gap-3">
-              <Button
-                id="connect-whatsapp-btn"
-                onClick={handleConnectWhatsApp}
-                disabled={embeddedConnecting || !canEditSettings}
-                className="bg-[#25D366] hover:bg-[#20BD5A] text-white font-medium shadow-xs"
-              >
-                {embeddedConnecting ? (
-                  <>
-                    <Loader2 className="size-4 animate-spin mr-1.5" />
-                    {t('connectingWhatsApp', { defaultMessage: 'Connecting WhatsApp…' })}
-                  </>
-                ) : (
-                  <>
-                    <Zap className="size-4 mr-1.5" />
-                    {connectionStatus === 'connected'
-                      ? t('reconnectWithWhatsApp', { defaultMessage: 'Reconnect or Switch Number' })
-                      : t('connectWithWhatsApp', { defaultMessage: 'Connect with WhatsApp' })}
-                  </>
-                )}
-              </Button>
-              {config?.phone_number_id && (
-                <div className="text-xs text-muted-foreground font-mono">
-                  Connected Phone Number ID: {config.phone_number_id}
-                </div>
-              )}
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Manual Configuration (Advanced / Self-Hosted Fallback) */}
-        <Accordion className="border-border">
-          <AccordionItem value="manual-setup" className="border rounded-lg bg-card px-4">
-            <AccordionTrigger className="text-sm font-semibold text-foreground hover:no-underline py-4">
-              <div className="flex items-center gap-2 text-left">
-                <span>{t('manualSetupTitle', { defaultMessage: 'Manual Configuration (Advanced / Self-Hosted)' })}</span>
-              </div>
-            </AccordionTrigger>
-            <AccordionContent className="pt-2 pb-6 space-y-4">
-              <p className="text-xs text-muted-foreground">
-                {t('manualSetupDesc', {
-                  defaultMessage:
-                    'Manually enter Phone Number ID, WABA ID, and Permanent Access Token if you prefer manual API management.',
-                })}
-              </p>
-
-              <div className="space-y-2">
-                <Label className="text-muted-foreground">{t('phoneNumberId')}</Label>
-                <Input
-                  placeholder={t('phoneNumberIdPlaceholder')}
-                  value={phoneNumberId}
-                  onChange={(e) => setPhoneNumberId(e.target.value)}
-                  className="bg-muted border-border text-foreground placeholder:text-muted-foreground"
-                />
-              </div>
-
-              <div className="space-y-2">
-                <Label className="text-muted-foreground">{t('wabaId')}</Label>
-                <Input
-                  placeholder={t('wabaIdPlaceholder')}
-                  value={wabaId}
-                  onChange={(e) => setWabaId(e.target.value)}
-                  className="bg-muted border-border text-foreground placeholder:text-muted-foreground"
-                />
-              </div>
-
-              <div className="space-y-2">
-                <Label className="text-muted-foreground">{t('accessToken')}</Label>
-                <div className="relative">
-                  <Input
-                    type={showToken ? 'text' : 'password'}
-                    placeholder={t('accessTokenPlaceholder')}
-                    value={accessToken}
-                    onChange={(e) => {
-                      setAccessToken(e.target.value);
-                      setTokenEdited(true);
-                    }}
-                    onFocus={() => {
-                      if (accessToken === MASKED_TOKEN) {
-                        setAccessToken('');
-                        setTokenEdited(true);
-                      }
-                    }}
-                    className="bg-muted border-border text-foreground placeholder:text-muted-foreground pr-10"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowToken(!showToken)}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+        {/* Main Section */}
+        <div className="space-y-6">
+          {/* Corrupted-token reset banner */}
+          {showResetBanner && (
+            <Alert className="bg-amber-950/40 border-amber-600/40">
+              <div className="flex items-start gap-3">
+                <AlertTriangle className="size-5 text-amber-400 mt-0.5 shrink-0" />
+                <div className="flex-1">
+                  <AlertTitle className="text-amber-200 mb-1">
+                    {t('tokenCorrupted')}
+                  </AlertTitle>
+                  <AlertDescription className="text-amber-100/80 text-sm">
+                    {statusMessage}
+                  </AlertDescription>
+                  <Button
+                    onClick={() => setDisconnectDialogOpen(true)}
+                    disabled={resetting}
+                    size="sm"
+                    className="mt-3 bg-amber-600 hover:bg-amber-700 text-white"
                   >
-                    {showToken ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-                  </button>
+                    <RotateCcw className="size-4 mr-1.5" />
+                    Reset Credentials
+                  </Button>
                 </div>
-                {config && !tokenEdited && (
-                  <p className="text-xs text-muted-foreground">
-                    {t('tokenHidden')}
+              </div>
+            </Alert>
+          )}
+
+          {/* Last save or validation failed */}
+          {saveFailure && (
+            <Alert className="bg-destructive/10 border-destructive/30">
+              <div className="flex items-start gap-3">
+                <XCircle className="size-5 text-destructive mt-0.5 shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <AlertTitle className="text-destructive font-semibold mb-1">
+                    {t('lastSaveFailed')}
+                  </AlertTitle>
+                  <AlertDescription className="text-destructive/90 text-sm">
+                    {saveFailure.message}
+                  </AlertDescription>
+                  {saveFailure.meta && renderMetaDetails(saveFailure.meta)}
+                </div>
+              </div>
+            </Alert>
+          )}
+
+          {/* Connected WhatsApp Business Account Card (Hero View) */}
+          {config && connectionStatus === 'connected' && !isEditingCredentials && (
+            <Card className="border-emerald-500/40 bg-card shadow-sm overflow-hidden">
+              <div className="h-1.5 bg-gradient-to-r from-emerald-500 via-teal-500 to-primary" />
+              <CardHeader className="pb-3">
+                <div className="flex items-center justify-between flex-wrap gap-3">
+                  <div className="flex items-center gap-3">
+                    <div className="flex size-11 items-center justify-center rounded-xl bg-emerald-500/10 text-emerald-600 border border-emerald-500/20">
+                      <Smartphone className="size-6" />
+                    </div>
+                    <div>
+                      <CardTitle className="text-foreground text-base flex items-center gap-2 flex-wrap">
+                        {phoneInfo?.verified_name || t('connectedGeneric', { defaultMessage: 'WhatsApp Business Number' })}
+                        <Badge variant="outline" className="bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/20 gap-1.5 font-medium py-0.5">
+                          <span className="size-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                          Connected
+                        </Badge>
+                        {isRegistered ? (
+                          <Badge variant="outline" className="bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/20 font-medium py-0.5">
+                            Cloud API Live
+                          </Badge>
+                        ) : (
+                          <Badge variant="outline" className="bg-amber-500/10 text-amber-600 border-amber-500/20 font-medium py-0.5">
+                            Registration Pending PIN
+                          </Badge>
+                        )}
+                      </CardTitle>
+                      <CardDescription className="text-muted-foreground text-xs mt-0.5">
+                        {phoneInfo?.display_phone_number
+                          ? `Active on ${phoneInfo.display_phone_number} · Cloud API messaging enabled`
+                          : 'Cloud API messaging and automation active'}
+                      </CardDescription>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleTestConnection}
+                      disabled={testing}
+                      className="border-border text-foreground hover:bg-muted text-xs h-8"
+                    >
+                      {testing ? (
+                        <Loader2 className="size-3.5 animate-spin mr-1.5" />
+                      ) : (
+                        <Zap className="size-3.5 mr-1.5 text-amber-500" />
+                      )}
+                      Test Connection
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setShowTestMessageCard(!showTestMessageCard)}
+                      className="border-border text-foreground hover:bg-muted text-xs h-8"
+                    >
+                      <Send className="size-3.5 mr-1.5 text-primary" />
+                      Test Message
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        setIsEditingCredentials(true);
+                        setTokenEdited(false);
+                        setAccessToken(MASKED_TOKEN);
+                      }}
+                      className="border-border text-foreground hover:bg-muted text-xs h-8"
+                    >
+                      <Pencil className="size-3.5 mr-1.5 text-muted-foreground" />
+                      Update
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setDisconnectDialogOpen(true)}
+                      className="border-destructive/30 text-destructive hover:bg-destructive/10 text-xs h-8"
+                    >
+                      <Trash2 className="size-3.5 mr-1.5" />
+                      Disconnect
+                    </Button>
+                  </div>
+                </div>
+              </CardHeader>
+
+              <CardContent className="space-y-4 pt-1">
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 pt-2 border-t border-border/60 text-xs">
+                  <div className="rounded-lg border border-border/70 bg-muted/40 p-2.5">
+                    <span className="text-muted-foreground block text-[11px] font-medium">{t('phoneNumberId')}</span>
+                    <div className="flex items-center justify-between mt-1">
+                      <span className="font-mono text-foreground font-semibold">{config.phone_number_id}</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard.writeText(config.phone_number_id);
+                          toast.success('Phone Number ID copied');
+                        }}
+                        className="text-muted-foreground hover:text-foreground p-0.5"
+                        title="Copy Phone Number ID"
+                      >
+                        <Copy className="size-3.5" />
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border border-border/70 bg-muted/40 p-2.5">
+                    <span className="text-muted-foreground block text-[11px] font-medium">{t('wabaId')}</span>
+                    <div className="flex items-center justify-between mt-1">
+                      <span className="font-mono text-foreground font-semibold">{config.waba_id || 'Auto-discovered'}</span>
+                      {config.waba_id && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            navigator.clipboard.writeText(config.waba_id!);
+                            toast.success('WABA ID copied');
+                          }}
+                          className="text-muted-foreground hover:text-foreground p-0.5"
+                          title="Copy WABA ID"
+                        >
+                          <Copy className="size-3.5" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border border-border/70 bg-muted/40 p-2.5">
+                    <span className="text-muted-foreground block text-[11px] font-medium">Webhook Delivery</span>
+                    <div className="flex items-center gap-1.5 mt-1 font-medium">
+                      {wabaSubscription?.subscribed === true ? (
+                        <>
+                          <CheckCircle2 className="size-3.5 text-emerald-600" />
+                          <span className="text-emerald-700 dark:text-emerald-400">Subscribed & Delivering</span>
+                        </>
+                      ) : wabaSubscription?.subscribed === false ? (
+                        <>
+                          <AlertTriangle className="size-3.5 text-amber-500" />
+                          <span className="text-amber-600">Pending WABA Subscription</span>
+                        </>
+                      ) : (
+                        <>
+                          <CheckCircle2 className="size-3.5 text-emerald-600" />
+                          <span className="text-muted-foreground">Active</span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between gap-4 flex-wrap text-xs text-muted-foreground pt-1">
+                  <div className="flex items-center gap-3">
+                    {phoneInfo?.quality_rating && (
+                      <div className="flex items-center gap-1.5">
+                        <span>Quality Rating:</span>
+                        <Badge variant="secondary" className="text-[11px] font-medium uppercase py-0">
+                          {phoneInfo.quality_rating}
+                        </Badge>
+                      </div>
+                    )}
+                    {config.connected_at && (
+                      <span>Connected since {new Date(config.connected_at).toLocaleDateString()}</span>
+                    )}
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={handleVerifyRegistration}
+                    disabled={verifyingRegistration}
+                    className="text-xs h-7 text-muted-foreground hover:text-foreground gap-1.5"
+                  >
+                    {verifyingRegistration ? (
+                      <Loader2 className="size-3 animate-spin" />
+                    ) : (
+                      <RefreshCw className="size-3" />
+                    )}
+                    Refresh Registration Status
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Registration Warning Banner when not registered */}
+          {config && !isRegistered && (
+            <Alert className="bg-amber-500/10 border-amber-500/30 text-amber-900 dark:text-amber-200">
+              <div className="flex items-start gap-3">
+                <AlertTriangle className="size-5 text-amber-600 dark:text-amber-400 mt-0.5 shrink-0" />
+                <div className="flex-1 space-y-2">
+                  <AlertTitle className="font-semibold text-sm">
+                    Phone Number Not Yet Registered for Cloud API
+                  </AlertTitle>
+                  <AlertDescription className="text-xs leading-relaxed opacity-90">
+                    {lastRegistrationError ? (
+                      <span>Registration attempt returned: &quot;{lastRegistrationError}&quot;.</span>
+                    ) : (
+                      <span>
+                        Your credentials are saved, but inbound Cloud API event delivery is not yet active.
+                        If this number is active on the WhatsApp Business mobile app, direct Cloud API registration requires a 6-digit PIN and will disconnect your mobile app.
+                        If this is a dedicated number, click Update Credentials and enter the 6-digit PIN set in WhatsApp Manager → Phone Numbers → Two-Step Verification.
+                      </span>
+                    )}
+                  </AlertDescription>
+                  <div className="flex items-center gap-2 pt-1">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleVerifyRegistration}
+                      disabled={verifyingRegistration}
+                      className="border-amber-500/40 text-amber-800 dark:text-amber-300 hover:bg-amber-500/20 text-xs h-7"
+                    >
+                      {verifyingRegistration ? <Loader2 className="size-3 animate-spin mr-1.5" /> : <RefreshCw className="size-3 mr-1.5" />}
+                      Re-check with Meta
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        setIsEditingCredentials(true);
+                        setTokenEdited(false);
+                        setAccessToken(MASKED_TOKEN);
+                      }}
+                      className="border-amber-500/40 text-amber-800 dark:text-amber-300 hover:bg-amber-500/20 text-xs h-7"
+                    >
+                      <Pencil className="size-3 mr-1.5" />
+                      Enter 2-Step PIN
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            </Alert>
+          )}
+
+          {/* Safe Test Message Card */}
+          {config && connectionStatus === 'connected' && showTestMessageCard && (
+            <Card className="border-primary/30 bg-card shadow-sm animate-in fade-in-50 duration-200">
+              <CardHeader className="pb-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Send className="size-4 text-primary" />
+                    <CardTitle className="text-foreground text-sm">Send Safe Test Message</CardTitle>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setShowTestMessageCard(false)}
+                    className="text-xs h-7 text-muted-foreground hover:text-foreground"
+                  >
+                    Close
+                  </Button>
+                </div>
+                <CardDescription className="text-xs text-muted-foreground">
+                  Verify outbound messaging through your Meta Cloud API connection safely by sending a message to your own WhatsApp number.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="space-y-1.5">
+                  <Label className="text-xs font-medium text-foreground">
+                    Destination Phone Number (with Country Code)
+                  </Label>
+                  <Input
+                    placeholder="e.g. +15551234567 or +919876543210"
+                    value={testRecipient}
+                    onChange={(e) => setTestRecipient(e.target.value)}
+                    className="bg-muted border-border font-mono text-xs"
+                  />
+                  <p className="text-[11px] text-muted-foreground">
+                    Must be in full international format (e.g. +91 for India, +1 for US/Canada). Note: Free-form text messages can only be delivered to recipients within an active 24-hour customer service window.
                   </p>
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label className="text-xs font-medium text-foreground">
+                    Test Message Text (Optional)
+                  </Label>
+                  <Textarea
+                    placeholder="Hello from Wattomation! This is a test message confirming your WhatsApp Cloud API connection is active."
+                    value={testCustomMessage}
+                    onChange={(e) => setTestCustomMessage(e.target.value)}
+                    rows={2}
+                    className="bg-muted border-border text-xs resize-none"
+                  />
+                </div>
+
+                {testMessageResponse && (
+                  <div
+                    className={
+                      'rounded-md p-2.5 text-xs border ' +
+                      (testMessageResponse.success
+                        ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-800 dark:text-emerald-300'
+                        : 'bg-destructive/10 border-destructive/30 text-destructive')
+                    }
+                  >
+                    {testMessageResponse.success ? (
+                      <div className="flex items-center gap-2">
+                        <CheckCircle2 className="size-4 shrink-0 text-emerald-600" />
+                        <div>
+                          <p className="font-medium">Test message dispatched successfully!</p>
+                          <p className="font-mono text-[11px] opacity-80 mt-0.5">
+                            Message ID: {testMessageResponse.messageId}
+                          </p>
+                        </div>
+                      </div>
+                    ) : (
+                      <div>
+                        <p className="font-medium">{testMessageResponse.error}</p>
+                        {testMessageResponse.meta && renderMetaDetails(testMessageResponse.meta)}
+                      </div>
+                    )}
+                  </div>
                 )}
-              </div>
 
-              <div className="space-y-2">
-                <Label className="text-muted-foreground">
-                  {t('twoStepPin')}
-                  <span className="ml-1 text-muted-foreground">{t('optional')}</span>
-                </Label>
-                <Input
-                  type="text"
-                  inputMode="numeric"
-                  maxLength={6}
-                  placeholder={t('pinPlaceholder')}
-                  value={pin}
-                  onChange={(e) =>
-                    setPin(e.target.value.replace(/\D/g, '').slice(0, 6))
-                  }
-                  className="bg-muted border-border text-foreground placeholder:text-muted-foreground tracking-widest"
-                />
-                <p className="text-xs text-muted-foreground leading-relaxed">
-                  <span dangerouslySetInnerHTML={{ __html: t('pinHint') }} />
-                </p>
-              </div>
+                <div className="pt-1 flex items-center gap-2">
+                  <Button
+                    onClick={handleSendTestMessage}
+                    disabled={sendingTestMessage || !testRecipient.trim()}
+                    size="sm"
+                    className="bg-primary hover:bg-primary/90 text-primary-foreground text-xs"
+                  >
+                    {sendingTestMessage ? (
+                      <>
+                        <Loader2 className="size-3.5 animate-spin mr-1.5" />
+                        Sending...
+                      </>
+                    ) : (
+                      <>
+                        <Send className="size-3.5 mr-1.5" />
+                        Send Test Message
+                      </>
+                    )}
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          )}
 
-              <div className="pt-2">
-                <Button
-                  onClick={handleSave}
-                  disabled={saving || !canEditSettings}
-                  className="bg-primary hover:bg-primary/90 text-primary-foreground"
-                >
-                  {saving ? (
-                    <>
-                      <Loader2 className="size-4 animate-spin" />
-                      {t('saving')}
-                    </>
-                  ) : (
-                    t('saveConfig')
-                  )}
-                </Button>
-              </div>
-            </AccordionContent>
-          </AccordionItem>
-        </Accordion>
+          {/* Manual WhatsApp Cloud API Setup Wizard (When disconnected or editing) */}
+          {(!config || isEditingCredentials || connectionStatus !== 'connected') && (
+            <div className="space-y-6">
+              {/* Wizard Steps Header Card */}
+              <Card className="border-border bg-card shadow-sm">
+                <CardHeader className="pb-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className="flex size-10 items-center justify-center rounded-xl bg-primary/10 text-primary border border-primary/20">
+                        <KeyRound className="size-5" />
+                      </div>
+                      <div>
+                        <CardTitle className="text-foreground text-base">
+                          {isEditingCredentials
+                            ? 'Update WhatsApp Cloud API Credentials'
+                            : 'Manual WhatsApp Cloud API Configuration'}
+                        </CardTitle>
+                        <CardDescription className="text-muted-foreground text-xs mt-0.5">
+                          {isEditingCredentials
+                            ? 'Update your access token, WABA ID, or phone number ID. Your current token is preserved if unchanged.'
+                            : 'Connect your own Meta WhatsApp Business Account using your developer credentials.'}
+                        </CardDescription>
+                      </div>
+                    </div>
+                    {isEditingCredentials && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => {
+                          setIsEditingCredentials(false);
+                          setValidationSuccess(null);
+                          if (config) {
+                            setPhoneNumberId(config.phone_number_id || '');
+                            setWabaId(config.waba_id || '');
+                            setAccessToken(MASKED_TOKEN);
+                            setTokenEdited(false);
+                          }
+                        }}
+                        className="text-xs text-muted-foreground hover:text-foreground"
+                      >
+                        Cancel
+                      </Button>
+                    )}
+                  </div>
+                </CardHeader>
 
-        {/* Webhook URL */}
-        <Card>
-          <CardHeader>
-            <div className="flex items-center justify-between">
-              <CardTitle className="text-foreground">{t('webhookTitle')}</CardTitle>
-              <span className="inline-flex items-center rounded-full bg-emerald-500/10 px-2.5 py-0.5 text-xs font-medium text-emerald-600 dark:text-emerald-400">
-                Shared Platform Webhook
-              </span>
+                <CardContent className="space-y-6 pt-2">
+                  {/* Step A — Meta Developer App Guide */}
+                  <div className="rounded-xl border border-border/80 bg-muted/30 p-4 space-y-3">
+                    <div className="flex items-center gap-2">
+                      <Badge className="bg-primary text-primary-foreground text-xs font-semibold px-2 py-0.5">
+                        Step A
+                      </Badge>
+                      <h4 className="font-semibold text-sm text-foreground">
+                        Meta Developer App & Permissions
+                      </h4>
+                    </div>
+                    <p className="text-xs text-muted-foreground leading-relaxed">
+                      To connect your WhatsApp number manually, you will use your own Meta Developer App and WhatsApp Business Account:
+                    </p>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
+                      <div className="rounded-lg border border-border/60 bg-card p-3 space-y-1.5">
+                        <span className="font-medium text-foreground flex items-center gap-1.5">
+                          <CheckCircle2 className="size-3.5 text-primary" /> 1. Meta Developer App
+                        </span>
+                        <p className="text-muted-foreground text-[11px] leading-relaxed">
+                          Create a Business App on Meta for Developers and add the <strong>WhatsApp</strong> product.
+                        </p>
+                        <a
+                          href="https://developers.facebook.com/apps"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 text-[11px] text-primary hover:underline font-medium pt-1"
+                        >
+                          Meta for Developers <ExternalLink className="size-3" />
+                        </a>
+                      </div>
+
+                      <div className="rounded-lg border border-border/60 bg-card p-3 space-y-1.5">
+                        <span className="font-medium text-foreground flex items-center gap-1.5">
+                          <ShieldCheck className="size-3.5 text-primary" /> 2. System User Token
+                        </span>
+                        <p className="text-muted-foreground text-[11px] leading-relaxed">
+                          In Business Settings → System Users, generate a permanent token with:
+                          <code className="block font-mono text-[10px] text-foreground mt-0.5">whatsapp_business_management</code>
+                          <code className="block font-mono text-[10px] text-foreground">whatsapp_business_messaging</code>
+                        </p>
+                        <a
+                          href="https://business.facebook.com/settings/system-users"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 text-[11px] text-primary hover:underline font-medium pt-1"
+                        >
+                          Meta Business Settings <ExternalLink className="size-3" />
+                        </a>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Step B — WhatsApp Business Account Credentials Form */}
+                  <div className="space-y-4">
+                    <div className="flex items-center gap-2">
+                      <Badge className="bg-primary text-primary-foreground text-xs font-semibold px-2 py-0.5">
+                        Step B
+                      </Badge>
+                      <h4 className="font-semibold text-sm text-foreground">
+                        Enter API Credentials
+                      </h4>
+                    </div>
+
+                    {/* Permanent Access Token */}
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <Label className="text-foreground font-medium text-xs flex items-center gap-1">
+                          {t('accessToken')}
+                          <span className="text-destructive">*</span>
+                        </Label>
+                        <span className="text-[11px] text-muted-foreground">Permanent System User Token</span>
+                      </div>
+                      <div className="relative">
+                        <Input
+                          type={showToken ? 'text' : 'password'}
+                          placeholder={
+                            config && !tokenEdited
+                              ? '•••••••••••••••• (Leave unchanged to keep current token)'
+                              : t('accessTokenPlaceholder')
+                          }
+                          value={accessToken}
+                          onChange={(e) => {
+                            setAccessToken(e.target.value);
+                            setTokenEdited(true);
+                          }}
+                          onFocus={() => {
+                            if (accessToken === MASKED_TOKEN) {
+                              setAccessToken('');
+                              setTokenEdited(true);
+                            }
+                          }}
+                          className="bg-muted border-border text-foreground placeholder:text-muted-foreground pr-10 font-mono text-xs"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowToken(!showToken)}
+                          className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+                        >
+                          {showToken ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                        </button>
+                      </div>
+                      <p className="text-[11px] text-muted-foreground leading-relaxed">
+                        Never enter your Meta App Secret here. Only paste a System User Permanent Access Token with WhatsApp permissions.
+                      </p>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {/* WhatsApp Business Account ID (WABA ID) */}
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <Label className="text-foreground font-medium text-xs">
+                            {t('wabaId')}
+                          </Label>
+                          <span className="text-[11px] text-muted-foreground">Numeric ID</span>
+                        </div>
+                        <Input
+                          placeholder={t('wabaIdPlaceholder')}
+                          value={wabaId}
+                          onChange={(e) => setWabaId(e.target.value)}
+                          className="bg-muted border-border text-foreground placeholder:text-muted-foreground font-mono text-xs"
+                        />
+                        <p className="text-[11px] text-muted-foreground leading-relaxed">
+                          Found in WhatsApp Manager under Account Settings, or in WhatsApp &gt; API Setup.
+                        </p>
+                      </div>
+
+                      {/* Phone Number ID */}
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <Label className="text-foreground font-medium text-xs">
+                            {t('phoneNumberId')}
+                          </Label>
+                          <span className="text-[11px] text-muted-foreground">Numeric ID</span>
+                        </div>
+                        <Input
+                          placeholder={t('phoneNumberIdPlaceholder')}
+                          value={phoneNumberId}
+                          onChange={(e) => setPhoneNumberId(e.target.value)}
+                          className="bg-muted border-border text-foreground placeholder:text-muted-foreground font-mono text-xs"
+                        />
+                        <p className="text-[11px] text-muted-foreground leading-relaxed">
+                          Found in Meta WhatsApp Manager under Phone Numbers or API Setup.
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Two-step PIN with Registration Safety Warning */}
+                    <div className="space-y-2 pt-1">
+                      <div className="flex items-center justify-between">
+                        <Label className="text-foreground font-medium text-xs flex items-center gap-1.5">
+                          {t('twoStepPin')}
+                          <span className="text-muted-foreground font-normal">{t('optional')}</span>
+                        </Label>
+                        <span className="text-[11px] text-muted-foreground">6-digit PIN</span>
+                      </div>
+                      <Input
+                        type="text"
+                        inputMode="numeric"
+                        maxLength={6}
+                        placeholder={t('pinPlaceholder')}
+                        value={pin}
+                        onChange={(e) => setPin(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                        className="bg-muted border-border text-foreground placeholder:text-muted-foreground tracking-widest font-mono text-xs w-full max-w-xs"
+                      />
+
+                      {/* Registration Safety Callout */}
+                      <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-900 dark:text-amber-200 space-y-1 leading-relaxed">
+                        <div className="flex items-center gap-1.5 font-semibold text-amber-700 dark:text-amber-400">
+                          <AlertTriangle className="size-3.5 shrink-0" />
+                          Registration Safety & WhatsApp Mobile App Coexistence
+                        </div>
+                        <p className="text-[11px] opacity-90">
+                          Standard Cloud API registration is designed for dedicated numbers. If this phone number is currently active in the <strong>WhatsApp Business mobile app</strong>, registering it with Cloud API will <strong>disconnect mobile app access</strong> (standard manual credentials do not support mobile-app Coexistence).
+                        </p>
+                        <p className="text-[11px] opacity-90">
+                          • If this number is already registered with Cloud API, leave this PIN blank.
+                          <br />
+                          • If this is a dedicated Cloud API number that needs registration, enter the 6-digit PIN set in WhatsApp Manager → Phone numbers → Two-step verification.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Step C — Validate Credentials (Pre-flight Test) */}
+                  <div className="rounded-xl border border-border/80 bg-muted/20 p-4 space-y-3">
+                    <div className="flex items-center justify-between flex-wrap gap-2">
+                      <div className="flex items-center gap-2">
+                        <Badge className="bg-primary text-primary-foreground text-xs font-semibold px-2 py-0.5">
+                          Step C
+                        </Badge>
+                        <h4 className="font-semibold text-sm text-foreground">
+                          Validate Credentials Pre-Flight
+                        </h4>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={handleValidateCredentials}
+                        disabled={validating || (!phoneNumberId.trim() && !wabaId.trim())}
+                        className="border-primary/40 text-primary hover:bg-primary/10 text-xs h-8"
+                      >
+                        {validating ? (
+                          <>
+                            <Loader2 className="size-3.5 animate-spin mr-1.5" />
+                            Validating with Meta...
+                          </>
+                        ) : (
+                          <>
+                            <ShieldCheck className="size-3.5 mr-1.5" />
+                            Validate Credentials
+                          </>
+                        )}
+                      </Button>
+                    </div>
+
+                    <p className="text-xs text-muted-foreground leading-relaxed">
+                      Test your access token and IDs with Meta Graph API before saving. This verifies permissions and retrieves your verified business name and phone number.
+                    </p>
+
+                    {validationSuccess && (
+                      <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 p-3 space-y-2 text-xs text-emerald-800 dark:text-emerald-300 animate-in fade-in-50">
+                        <div className="flex items-center gap-2 font-semibold">
+                          <CheckCircle2 className="size-4 text-emerald-600" />
+                          <span>Credentials Validated Successfully</span>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] pt-1 border-t border-emerald-500/20">
+                          <div>
+                            <span className="text-muted-foreground block">Verified Business:</span>
+                            <span className="font-medium text-foreground">
+                              {validationSuccess.phone_info?.verified_name || 'Verified on Meta'}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground block">Display Phone:</span>
+                            <span className="font-mono font-medium text-foreground">
+                              {validationSuccess.phone_info?.display_phone_number || 'Confirmed'}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground block">Phone Number ID:</span>
+                            <span className="font-mono text-foreground">
+                              {validationSuccess.phone_number_id || validationSuccess.phone_info?.id}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground block">Quality Rating:</span>
+                            <span className="font-medium text-foreground uppercase">
+                              {validationSuccess.phone_info?.quality_rating || 'UNKNOWN'}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Step D — Webhook Configuration */}
+                  <div className="rounded-xl border border-border/80 bg-muted/20 p-4 space-y-3">
+                    <div className="flex items-center gap-2">
+                      <Badge className="bg-primary text-primary-foreground text-xs font-semibold px-2 py-0.5">
+                        Step D
+                      </Badge>
+                      <h4 className="font-semibold text-sm text-foreground">
+                        Configure Webhook in Meta Dashboard
+                      </h4>
+                    </div>
+
+                    <p className="text-xs text-muted-foreground leading-relaxed">
+                      Enter Wattomation&apos;s Webhook Callback URL in your Meta Developer App to receive inbound messages and status updates:
+                    </p>
+
+                    <div className="space-y-2">
+                      <Label className="text-xs text-muted-foreground">Webhook Callback URL</Label>
+                      <div className="flex gap-2">
+                        <Input
+                          readOnly
+                          value={webhookUrl}
+                          className="bg-muted border-border text-foreground font-mono text-xs"
+                        />
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="icon"
+                          onClick={handleCopyWebhookUrl}
+                          className="shrink-0 border-border text-muted-foreground hover:text-foreground"
+                          title="Copy Webhook URL"
+                        >
+                          <Copy className="size-4" />
+                        </Button>
+                      </div>
+                    </div>
+
+                    <div className="rounded-lg bg-card border border-border/60 p-3 text-xs space-y-1.5 text-muted-foreground">
+                      <p className="font-medium text-foreground">Required Meta Developer Dashboard Actions:</p>
+                      <ol className="list-decimal list-inside space-y-1 text-[11px] leading-relaxed">
+                        <li>In your App, navigate to <strong>WhatsApp → Configuration → Webhook</strong>.</li>
+                        <li>Click <strong>Edit</strong> and paste the Callback URL above.</li>
+                        <li>Enter your platform Verify Token (matches your server environment configuration).</li>
+                        <li>In Webhook fields, click <strong>Manage</strong> and subscribe to <strong>messages</strong>.</li>
+                      </ol>
+                    </div>
+                  </div>
+
+                  {/* Step E — Save & Connect Button */}
+                  <div className="pt-2 flex items-center gap-3">
+                    <Button
+                      id="connect-whatsapp-btn"
+                      onClick={handleSave}
+                      disabled={saving || !canEditSettings}
+                      className="bg-primary hover:bg-primary/90 text-primary-foreground font-medium shadow-xs"
+                    >
+                      {saving ? (
+                        <>
+                          <Loader2 className="size-4 animate-spin mr-1.5" />
+                          {t('saving')}
+                        </>
+                      ) : isEditingCredentials ? (
+                        <>
+                          <Check className="size-4 mr-1.5" />
+                          Save Credentials & Subscriptions
+                        </>
+                      ) : (
+                        <>
+                          <Zap className="size-4 mr-1.5" />
+                          Connect WhatsApp Cloud API
+                        </>
+                      )}
+                    </Button>
+
+                    {isEditingCredentials && (
+                      <Button
+                        variant="outline"
+                        onClick={() => {
+                          setIsEditingCredentials(false);
+                          setValidationSuccess(null);
+                          if (config) {
+                            setPhoneNumberId(config.phone_number_id || '');
+                            setWabaId(config.waba_id || '');
+                            setAccessToken(MASKED_TOKEN);
+                            setTokenEdited(false);
+                          }
+                        }}
+                        className="border-border text-foreground hover:bg-muted"
+                      >
+                        Cancel
+                      </Button>
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
             </div>
-            <CardDescription className="text-muted-foreground">
-              {t('webhookDesc')}
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <div className="space-y-2">
-              <Label className="text-muted-foreground">{t('webhookUrl')}</Label>
-              <div className="flex gap-2">
-                <Input
-                  readOnly
-                  value={webhookUrl}
-                  className="bg-muted border-border text-muted-foreground font-mono text-sm"
-                />
-                <Button
-                  variant="outline"
-                  size="icon"
-                  onClick={handleCopyWebhookUrl}
-                  className="shrink-0 border-border text-muted-foreground hover:text-foreground hover:bg-muted"
-                >
-                  <Copy className="size-4" />
-                </Button>
-              </div>
-            </div>
-            <p className="text-xs text-muted-foreground leading-relaxed">
-              Platform webhook verification is configured once centrally for all Wattomation tenants. Inbound WhatsApp messages are automatically routed to your workspace based on your registered Phone Number ID.
-            </p>
-          </CardContent>
-        </Card>
+          )}
 
-        {/* Attachment retention. Only meaningful once a number is
-            connected, since it governs what the webhook does with
-            inbound media. */}
-        {config && (
+          {/* Webhook Configuration Reference Card */}
           <Card>
-            <CardHeader>
-              <CardTitle className="text-foreground">{t('mediaTitle')}</CardTitle>
-              <CardDescription className="text-muted-foreground">
-                {t('mediaDesc')}
+            <CardHeader className="pb-3">
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-foreground text-sm flex items-center gap-2">
+                  <Radio className="size-4 text-emerald-600" />
+                  {t('webhookTitle')}
+                </CardTitle>
+                <Badge variant="outline" className="bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/20 text-[11px]">
+                  Multi-Tenant Routing Active
+                </Badge>
+              </div>
+              <CardDescription className="text-xs text-muted-foreground">
+                Inbound WhatsApp events delivered to this webhook are cryptographically verified and routed automatically to your workspace based on your registered Phone Number ID.
               </CardDescription>
             </CardHeader>
-            <CardContent>
-              <div className="flex items-center justify-between gap-4 rounded-md border border-border p-3">
-                <div>
-                  <p className="text-sm font-medium text-foreground">
-                    {t('mirrorInbound')}
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    {t('mirrorInboundDesc')}
-                  </p>
-                  {!mirrorMedia && (
-                    <p className="mt-1 text-xs text-amber-600 dark:text-amber-500">
-                      {t('mirrorInboundOffWarning')}
-                    </p>
-                  )}
+            <CardContent className="space-y-3">
+              <div className="space-y-1.5">
+                <Label className="text-xs text-muted-foreground">{t('webhookUrl')}</Label>
+                <div className="flex gap-2">
+                  <Input
+                    readOnly
+                    value={webhookUrl}
+                    className="bg-muted border-border text-muted-foreground font-mono text-xs"
+                  />
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    onClick={handleCopyWebhookUrl}
+                    className="shrink-0 border-border text-muted-foreground hover:text-foreground hover:bg-muted"
+                  >
+                    <Copy className="size-4" />
+                  </Button>
                 </div>
-                <Switch
-                  checked={mirrorMedia}
-                  onCheckedChange={handleToggleMirrorMedia}
-                  disabled={savingMirror || !canEditSettings}
-                  aria-label={t('mirrorInbound')}
-                />
               </div>
             </CardContent>
           </Card>
-        )}
 
-        {/* Action Buttons */}
-        <div className="flex flex-wrap gap-3">
-          <Button
-            variant="outline"
-            onClick={handleTestConnection}
-            disabled={testing || !config}
-            className="border-border text-muted-foreground hover:text-foreground hover:bg-muted"
-          >
-            {testing ? (
-              <>
-                <Loader2 className="size-4 animate-spin" />
-                {t('testing')}
-              </>
-            ) : (
-              <>
-                <Zap className="size-4" />
-                {t('testConnection')}
-              </>
-            )}
-          </Button>
+          {/* Attachment Storage Card */}
           {config && (
-            <Button
-              variant="outline"
-              onClick={handleReset}
-              disabled={resetting}
-              className="border-red-900 text-red-400 hover:text-red-300 hover:bg-red-950/40"
-            >
-              {resetting ? (
-                <>
-                  <Loader2 className="size-4 animate-spin" />
-                  {t('resetting')}
-                </>
-              ) : (
-                <>
-                  <RotateCcw className="size-4" />
-                  {t('resetConfig')}
-                </>
-              )}
-            </Button>
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-foreground text-sm">{t('mediaTitle')}</CardTitle>
+                <CardDescription className="text-xs text-muted-foreground">
+                  {t('mediaDesc')}
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center justify-between gap-4 rounded-md border border-border p-3">
+                  <div>
+                    <p className="text-sm font-medium text-foreground">
+                      {t('mirrorInbound')}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {t('mirrorInboundDesc')}
+                    </p>
+                    {!mirrorMedia && (
+                      <p className="mt-1 text-xs text-amber-600 dark:text-amber-500">
+                        {t('mirrorInboundOffWarning')}
+                      </p>
+                    )}
+                  </div>
+                  <Switch
+                    checked={mirrorMedia}
+                    onCheckedChange={handleToggleMirrorMedia}
+                    disabled={savingMirror || !canEditSettings}
+                    aria-label={t('mirrorInbound')}
+                  />
+                </div>
+              </CardContent>
+            </Card>
           )}
+        </div>
+
+        {/* Sidebar — Setup Instructions Accordion */}
+        <div className="space-y-6">
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-foreground text-sm flex items-center gap-2">
+                <HelpCircle className="size-4 text-primary" />
+                {t('setupInstructions')}
+              </CardTitle>
+              <CardDescription className="text-xs text-muted-foreground">
+                Detailed Meta Developer Dashboard setup reference.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Accordion>
+                <AccordionItem className="border-border">
+                  <AccordionTrigger className="text-muted-foreground hover:text-foreground hover:no-underline text-xs py-2.5">
+                    <span className="flex items-center gap-2">
+                      <span className="flex size-5 items-center justify-center rounded-full bg-primary text-[10px] font-bold text-primary-foreground">1</span>
+                      {t('step1')}
+                    </span>
+                  </AccordionTrigger>
+                  <AccordionContent className="text-muted-foreground text-xs">
+                    <ol className="list-decimal list-inside space-y-1 text-xs">
+                      <li dangerouslySetInnerHTML={{ __html: t('step1_1') }} />
+                      <li>{t('step1_2')}</li>
+                      <li>{t('step1_3')}</li>
+                      <li>{t('step1_4')}</li>
+                    </ol>
+                  </AccordionContent>
+                </AccordionItem>
+
+                <AccordionItem className="border-border">
+                  <AccordionTrigger className="text-muted-foreground hover:text-foreground hover:no-underline text-xs py-2.5">
+                    <span className="flex items-center gap-2">
+                      <span className="flex size-5 items-center justify-center rounded-full bg-primary text-[10px] font-bold text-primary-foreground">2</span>
+                      {t('step2')}
+                    </span>
+                  </AccordionTrigger>
+                  <AccordionContent className="text-muted-foreground text-xs">
+                    <ol className="list-decimal list-inside space-y-1 text-xs">
+                      <li>{t('step2_1')}</li>
+                      <li>{t('step2_2')}</li>
+                      <li>{t('step2_3')}</li>
+                    </ol>
+                  </AccordionContent>
+                </AccordionItem>
+
+                <AccordionItem className="border-border">
+                  <AccordionTrigger className="text-muted-foreground hover:text-foreground hover:no-underline text-xs py-2.5">
+                    <span className="flex items-center gap-2">
+                      <span className="flex size-5 items-center justify-center rounded-full bg-primary text-[10px] font-bold text-primary-foreground">3</span>
+                      {t('step3')}
+                    </span>
+                  </AccordionTrigger>
+                  <AccordionContent className="text-muted-foreground text-xs">
+                    <ol className="list-decimal list-inside space-y-1 text-xs">
+                      <li>{t('step3_1')}</li>
+                      <li dangerouslySetInnerHTML={{ __html: t.raw('step3_2') }} />
+                      <li dangerouslySetInnerHTML={{ __html: t.raw('step3_3') }} />
+                      <li dangerouslySetInnerHTML={{ __html: t.raw('step3_4') }} />
+                    </ol>
+                    <div className="mt-2.5 rounded-md bg-muted/60 p-2.5 text-[11px] space-y-1 text-muted-foreground border border-border/50">
+                      <p className="font-semibold text-foreground">
+                        Permanent Token Instructions:
+                      </p>
+                      <p>1. In Business Settings &gt; System Users, select your System User.</p>
+                      <p>2. Under Assets, add your WhatsApp Business Account with Full Control.</p>
+                      <p>3. Generate Token with <code className="text-foreground font-mono">whatsapp_business_management</code> and <code className="text-foreground font-mono">whatsapp_business_messaging</code>.</p>
+                    </div>
+                  </AccordionContent>
+                </AccordionItem>
+
+                <AccordionItem className="border-border">
+                  <AccordionTrigger className="text-muted-foreground hover:text-foreground hover:no-underline text-xs py-2.5">
+                    <span className="flex items-center gap-2">
+                      <span className="flex size-5 items-center justify-center rounded-full bg-primary text-[10px] font-bold text-primary-foreground">4</span>
+                      {t('step4')}
+                    </span>
+                  </AccordionTrigger>
+                  <AccordionContent className="text-muted-foreground text-xs">
+                    <ol className="list-decimal list-inside space-y-1 text-xs">
+                      <li>{t('step4_1')}</li>
+                      <li>{t('step4_2')}</li>
+                      <li dangerouslySetInnerHTML={{ __html: t.raw('step4_3') }} />
+                      <li dangerouslySetInnerHTML={{ __html: t.raw('step4_4') }} />
+                      <li>{t('step4_5')}</li>
+                    </ol>
+                  </AccordionContent>
+                </AccordionItem>
+              </Accordion>
+
+              <div className="mt-4 pt-4 border-t border-border">
+                <a
+                  href="https://developers.facebook.com/docs/whatsapp/cloud-api/get-started"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 text-xs text-primary hover:text-primary/80 transition-colors"
+                >
+                  <ExternalLink className="size-3.5" />
+                  {t('metaDocs')}
+                </a>
+              </div>
+            </CardContent>
+          </Card>
         </div>
       </div>
 
-      {/* Setup Instructions Sidebar */}
-      <div>
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-foreground text-base">{t('setupInstructions')}</CardTitle>
-            <CardDescription className="text-muted-foreground">
-              {t('setupInstructionsDesc')}
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Accordion>
-              <AccordionItem className="border-border">
-                <AccordionTrigger className="text-muted-foreground hover:text-foreground hover:no-underline">
-                  <span className="flex items-center gap-2">
-                    <span className="flex size-5 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">1</span>
-                    {t('step1')}
-                  </span>
-                </AccordionTrigger>
-                <AccordionContent className="text-muted-foreground">
-                  <ol className="list-decimal list-inside space-y-1 text-sm">
-                    <li dangerouslySetInnerHTML={{ __html: t('step1_1') }} />
-                    <li>{t('step1_2')}</li>
-                    <li>{t('step1_3')}</li>
-                    <li>{t('step1_4')}</li>
-                  </ol>
-                </AccordionContent>
-              </AccordionItem>
+      {/* Disconnect Confirmation Dialog */}
+      <Dialog open={disconnectDialogOpen} onOpenChange={setDisconnectDialogOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-destructive">
+              <AlertTriangle className="size-5" />
+              Disconnect WhatsApp Integration
+            </DialogTitle>
+            <DialogDescription className="text-xs text-muted-foreground leading-relaxed pt-2">
+              Are you sure you want to disconnect WhatsApp from Wattomation?
+            </DialogDescription>
+          </DialogHeader>
 
-              <AccordionItem className="border-border">
-                <AccordionTrigger className="text-muted-foreground hover:text-foreground hover:no-underline">
-                  <span className="flex items-center gap-2">
-                    <span className="flex size-5 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">2</span>
-                    {t('step2')}
-                  </span>
-                </AccordionTrigger>
-                <AccordionContent className="text-muted-foreground">
-                  <ol className="list-decimal list-inside space-y-1 text-sm">
-                    <li>{t('step2_1')}</li>
-                    <li>{t('step2_2')}</li>
-                    <li>{t('step2_3')}</li>
-                  </ol>
-                </AccordionContent>
-              </AccordionItem>
+          <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-xs space-y-2 leading-relaxed text-foreground">
+            <p className="font-medium text-destructive">What disconnecting does:</p>
+            <ul className="list-disc list-inside space-y-1 text-muted-foreground text-[11px]">
+              <li>Removes your WhatsApp API credentials from this Wattomation workspace.</li>
+              <li>Stops messaging automations, bots, and inbound event routing for this account.</li>
+            </ul>
 
-              <AccordionItem className="border-border">
-                <AccordionTrigger className="text-muted-foreground hover:text-foreground hover:no-underline">
-                  <span className="flex items-center gap-2">
-                    <span className="flex size-5 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">3</span>
-                    {t('step3')}
-                  </span>
-                </AccordionTrigger>
-                <AccordionContent className="text-muted-foreground">
-                  <ol className="list-decimal list-inside space-y-1 text-sm">
-                    <li>{t('step3_1')}</li>
-                    <li dangerouslySetInnerHTML={{ __html: t.raw('step3_2') }} />
-                    <li dangerouslySetInnerHTML={{ __html: t.raw('step3_3') }} />
-                    <li dangerouslySetInnerHTML={{ __html: t.raw('step3_4') }} />
-                  </ol>
-                </AccordionContent>
-              </AccordionItem>
+            <p className="font-medium text-emerald-600 dark:text-emerald-400 pt-1">What disconnecting does NOT do:</p>
+            <ul className="list-disc list-inside space-y-1 text-muted-foreground text-[11px]">
+              <li>Does <strong>NOT</strong> delete or alter your Meta WhatsApp Business Account.</li>
+              <li>Does <strong>NOT</strong> deregister your phone number from Meta.</li>
+              <li>Does <strong>NOT</strong> delete any message templates or business settings on Meta.</li>
+            </ul>
+          </div>
 
-              <AccordionItem className="border-border">
-                <AccordionTrigger className="text-muted-foreground hover:text-foreground hover:no-underline">
-                  <span className="flex items-center gap-2">
-                    <span className="flex size-5 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">4</span>
-                    {t('step4')}
-                  </span>
-                </AccordionTrigger>
-                <AccordionContent className="text-muted-foreground">
-                  <ol className="list-decimal list-inside space-y-1 text-sm">
-                    <li>{t('step4_1')}</li>
-                    <li>{t('step4_2')}</li>
-                    <li dangerouslySetInnerHTML={{ __html: t.raw('step4_3') }} />
-                    <li dangerouslySetInnerHTML={{ __html: t.raw('step4_4') }} />
-                    <li>{t('step4_5')}</li>
-                  </ol>
-                </AccordionContent>
-              </AccordionItem>
-            </Accordion>
-
-            <div className="mt-4 pt-4 border-t border-border">
-              <a
-                href="https://developers.facebook.com/docs/whatsapp/cloud-api/get-started"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-1.5 text-sm text-primary hover:text-primary/80 transition-colors"
-              >
-                <ExternalLink className="size-3.5" />
-                {t('metaDocs')}
-              </a>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-    </div>
+          <DialogFooter className="gap-2 sm:gap-0 pt-2">
+            <Button
+              variant="outline"
+              onClick={() => setDisconnectDialogOpen(false)}
+              disabled={resetting}
+              size="sm"
+              className="text-xs"
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleDisconnectConfirm}
+              disabled={resetting}
+              size="sm"
+              className="text-xs"
+            >
+              {resetting ? (
+                <>
+                  <Loader2 className="size-3.5 animate-spin mr-1.5" />
+                  Disconnecting...
+                </>
+              ) : (
+                'Disconnect WhatsApp'
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </section>
   );
 }

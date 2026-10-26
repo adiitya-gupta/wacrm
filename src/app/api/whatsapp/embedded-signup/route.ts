@@ -139,7 +139,10 @@ export async function POST(request: Request) {
       }
     }
 
-    const grantedScopes = new Set(tokenData.scopes);
+    const grantedScopes = new Set<string>([
+      ...(tokenData.scopes || []).map((s) => (typeof s === 'string' ? s.trim() : '')).filter(Boolean),
+      ...((tokenData.granularScopes || []).map((gs) => (typeof gs?.scope === 'string' ? gs.scope.trim() : '')).filter(Boolean)),
+    ]);
     const missingScopes = REQUIRED_SCOPES.filter((scope) => !grantedScopes.has(scope));
     if (missingScopes.length > 0) {
       return NextResponse.json(

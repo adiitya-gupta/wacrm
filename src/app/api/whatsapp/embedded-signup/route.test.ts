@@ -195,35 +195,217 @@ describe('POST /api/whatsapp/embedded-signup', () => {
     expect(json.error).toMatch(/authorization code/i);
   });
 
-  it('returns 400 when token lacks required permissions', async () => {
-    setupAuthMock('admin');
+  describe('permission validation (scopes and granular_scopes)', () => {
+    it('connects successfully when both required permissions are in regular scopes (empty granular_scopes)', async () => {
+      setupAuthMock('admin');
 
-    vi.spyOn(metaApi, 'exchangeOAuthCode').mockResolvedValue({
-      accessToken: 'token_123',
-      tokenType: 'bearer',
+      vi.spyOn(metaApi, 'exchangeOAuthCode').mockResolvedValue({
+        accessToken: 'EAAB_user_token_123',
+        tokenType: 'bearer',
+      });
+      vi.spyOn(metaApi, 'debugToken').mockResolvedValue({
+        isValid: true,
+        expiresAt: 0,
+        scopes: ['whatsapp_business_management', 'whatsapp_business_messaging'],
+        granularScopes: [],
+      });
+      vi.spyOn(metaApi, 'listWabaPhoneNumbers').mockResolvedValue([
+        { id: '11112345678', display_phone_number: '+1 555-0199' },
+      ]);
+      vi.spyOn(metaApi, 'verifyPhoneNumber').mockResolvedValue({
+        id: '11112345678',
+        display_phone_number: '+1 555-0199',
+      });
+      vi.spyOn(metaApi, 'subscribeWabaToApp').mockResolvedValue();
+
+      const req = new Request('http://localhost/api/whatsapp/embedded-signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          code: 'valid_code',
+          waba_id: '99912345678',
+          phone_number_id: '11112345678',
+        }),
+      });
+
+      const res = await POST(req);
+      expect(res.status).toBe(200);
+      const json = await res.json();
+      expect(json.success).toBe(true);
     });
 
-    vi.spyOn(metaApi, 'debugToken').mockResolvedValue({
-      isValid: true,
-      scopes: ['whatsapp_business_messaging'], // missing whatsapp_business_management!
+    it('connects successfully when both required permissions are ONLY in granular_scopes (Facebook Login for Business)', async () => {
+      setupAuthMock('admin');
+
+      vi.spyOn(metaApi, 'exchangeOAuthCode').mockResolvedValue({
+        accessToken: 'EAAB_user_token_123',
+        tokenType: 'bearer',
+      });
+      vi.spyOn(metaApi, 'debugToken').mockResolvedValue({
+        isValid: true,
+        expiresAt: 0,
+        scopes: ['business_management', 'public_profile'], // WhatsApp scopes NOT in scopes
+        granularScopes: [
+          { scope: 'whatsapp_business_management', targetIds: ['99912345678'] },
+          { scope: 'whatsapp_business_messaging', targetIds: ['99912345678'] },
+        ],
+      });
+      vi.spyOn(metaApi, 'listWabaPhoneNumbers').mockResolvedValue([
+        { id: '11112345678', display_phone_number: '+1 555-0199' },
+      ]);
+      vi.spyOn(metaApi, 'verifyPhoneNumber').mockResolvedValue({
+        id: '11112345678',
+        display_phone_number: '+1 555-0199',
+      });
+      vi.spyOn(metaApi, 'subscribeWabaToApp').mockResolvedValue();
+
+      const req = new Request('http://localhost/api/whatsapp/embedded-signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          code: 'valid_code',
+          waba_id: '99912345678',
+          phone_number_id: '11112345678',
+        }),
+      });
+
+      const res = await POST(req);
+      expect(res.status).toBe(200);
+      const json = await res.json();
+      expect(json.success).toBe(true);
     });
 
-    const req = new Request('http://localhost/api/whatsapp/embedded-signup', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        code: 'code_missing_permissions',
-        waba_id: 'waba_999',
-        phone_number_id: 'phone_111',
-      }),
+    it('returns 400 when whatsapp_business_management is missing from both scopes and granular_scopes', async () => {
+      setupAuthMock('admin');
+
+      vi.spyOn(metaApi, 'exchangeOAuthCode').mockResolvedValue({
+        accessToken: 'token_123',
+        tokenType: 'bearer',
+      });
+      vi.spyOn(metaApi, 'debugToken').mockResolvedValue({
+        isValid: true,
+        scopes: ['business_management'],
+        granularScopes: [
+          { scope: 'whatsapp_business_messaging', targetIds: ['waba_999'] },
+        ],
+      });
+
+      const req = new Request('http://localhost/api/whatsapp/embedded-signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          code: 'code_missing_mgmt',
+          waba_id: 'waba_999',
+          phone_number_id: 'phone_111',
+        }),
+      });
+
+      const res = await POST(req);
+      expect(res.status).toBe(400);
+
+      const json = await res.json();
+      expect(json.error).toMatch(/whatsapp_business_management/);
+      expect(json.missing_scopes).toEqual(['whatsapp_business_management']);
     });
 
-    const res = await POST(req);
-    expect(res.status).toBe(400);
+    it('returns 400 when whatsapp_business_messaging is missing from both scopes and granular_scopes', async () => {
+      setupAuthMock('admin');
 
-    const json = await res.json();
-    expect(json.error).toMatch(/permissions/i);
-    expect(json.missing_scopes).toContain('whatsapp_business_management');
+      vi.spyOn(metaApi, 'exchangeOAuthCode').mockResolvedValue({
+        accessToken: 'token_123',
+        tokenType: 'bearer',
+      });
+      vi.spyOn(metaApi, 'debugToken').mockResolvedValue({
+        isValid: true,
+        scopes: ['business_management'],
+        granularScopes: [
+          { scope: 'whatsapp_business_management', targetIds: ['waba_999'] },
+        ],
+      });
+
+      const req = new Request('http://localhost/api/whatsapp/embedded-signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          code: 'code_missing_msg',
+          waba_id: 'waba_999',
+          phone_number_id: 'phone_111',
+        }),
+      });
+
+      const res = await POST(req);
+      expect(res.status).toBe(400);
+
+      const json = await res.json();
+      expect(json.error).toMatch(/whatsapp_business_messaging/);
+      expect(json.missing_scopes).toEqual(['whatsapp_business_messaging']);
+    });
+
+    it('returns 400 when scope data is completely empty', async () => {
+      setupAuthMock('admin');
+
+      vi.spyOn(metaApi, 'exchangeOAuthCode').mockResolvedValue({
+        accessToken: 'token_123',
+        tokenType: 'bearer',
+      });
+      vi.spyOn(metaApi, 'debugToken').mockResolvedValue({
+        isValid: true,
+        scopes: [],
+        granularScopes: [],
+      });
+
+      const req = new Request('http://localhost/api/whatsapp/embedded-signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          code: 'code_empty_scopes',
+          waba_id: 'waba_999',
+          phone_number_id: 'phone_111',
+        }),
+      });
+
+      const res = await POST(req);
+      expect(res.status).toBe(400);
+
+      const json = await res.json();
+      expect(json.error).toMatch(/permissions/i);
+      expect(json.missing_scopes).toEqual([
+        'whatsapp_business_management',
+        'whatsapp_business_messaging',
+      ]);
+    });
+
+    it('returns 400 when granular_scopes is undefined or missing', async () => {
+      setupAuthMock('admin');
+
+      vi.spyOn(metaApi, 'exchangeOAuthCode').mockResolvedValue({
+        accessToken: 'token_123',
+        tokenType: 'bearer',
+      });
+      vi.spyOn(metaApi, 'debugToken').mockResolvedValue({
+        isValid: true,
+        scopes: [],
+      });
+
+      const req = new Request('http://localhost/api/whatsapp/embedded-signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          code: 'code_undefined_scopes',
+          waba_id: 'waba_999',
+          phone_number_id: 'phone_111',
+        }),
+      });
+
+      const res = await POST(req);
+      expect(res.status).toBe(400);
+
+      const json = await res.json();
+      expect(json.missing_scopes).toEqual([
+        'whatsapp_business_management',
+        'whatsapp_business_messaging',
+      ]);
+    });
   });
 
   it('returns 409 Conflict when phone number is already claimed by another tenant', async () => {

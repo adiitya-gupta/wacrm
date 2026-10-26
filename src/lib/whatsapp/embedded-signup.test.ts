@@ -360,6 +360,38 @@ describe('Embedded Signup Client Helpers', () => {
       );
     });
 
+    it('passes exact 9e2abab FB.login extras to prevent BSP/TP partner restrictions (regression test)', async () => {
+      let passedOptions: unknown = null;
+      mockWindow.FB = {
+        init: vi.fn(),
+        login: vi.fn().mockImplementation((cb: (res: { authResponse?: { code?: string } }) => void, opts: unknown) => {
+          passedOptions = opts;
+          cb({ authResponse: { code: 'test_code' } });
+        }),
+      };
+
+      await launchEmbeddedSignup({
+        appId: '1123443980045363',
+        configId: '29489040784036759',
+        onSuccess: vi.fn(),
+      });
+
+      expect(passedOptions).toEqual({
+        config_id: '29489040784036759',
+        response_type: 'code',
+        override_default_response_type: true,
+        extras: {
+          setup: {},
+          featureType: '',
+          sessionInfoVersion: '2',
+        },
+      });
+
+      const extras = (passedOptions as { extras?: Record<string, unknown> })?.extras;
+      expect(extras?.feature).toBeUndefined();
+      expect(extras?.sessionInfoVersion).toBe('2');
+    });
+
     it('captures WABA and phone ID from message listener when finishing', async () => {
       let loginCallback: ((res: { authResponse?: { code?: string } }) => void) | null = null;
 

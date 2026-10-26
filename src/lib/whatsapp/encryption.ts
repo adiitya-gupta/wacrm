@@ -39,17 +39,50 @@ export function validateEncryptionKey(keyString?: string): Buffer {
   }
 
   const trimmed = key.trim();
-  if (trimmed.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(trimmed)) {
+  const primary = trimmed.split(',')[0].trim();
+  if (primary.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(primary)) {
     throw new Error(
-      `Invalid ENCRYPTION_KEY length or format (${trimmed.length} characters). Must be exactly 64 hexadecimal characters representing a 32-byte AES-256 key.`,
+      `Invalid ENCRYPTION_KEY length or format (${primary.length} characters). Must be exactly 64 hexadecimal characters representing a 32-byte AES-256 key.`,
     );
   }
 
-  return Buffer.from(trimmed, 'hex');
+  return Buffer.from(primary, 'hex');
 }
 
 export function getEncryptionKeyBuffer(): Buffer {
   return validateEncryptionKey();
+}
+
+/**
+ * Retrieve candidate encryption keys for decryption. The first key is primary.
+ * Fallback keys (from comma-separated ENCRYPTION_KEY, PREVIOUS_ENCRYPTION_KEY,
+ * or ENCRYPTION_KEY_FALLBACK) allow seamless key rotation without orphaning
+ * previously-stored encrypted tokens.
+ */
+export function getCandidateKeyBuffers(): Buffer[] {
+  const rawSources = [
+    process.env.ENCRYPTION_KEY,
+    process.env.PREVIOUS_ENCRYPTION_KEY,
+    process.env.ENCRYPTION_KEY_FALLBACK,
+  ].filter(Boolean) as string[];
+
+  const keys: Buffer[] = [];
+  const seen = new Set<string>();
+
+  for (const raw of rawSources) {
+    for (const piece of raw.split(',')) {
+      const clean = piece.trim();
+      if (clean.length === 64 && /^[0-9a-fA-F]{64}$/.test(clean) && !seen.has(clean.toLowerCase())) {
+        seen.add(clean.toLowerCase());
+        keys.push(Buffer.from(clean, 'hex'));
+      }
+    }
+  }
+
+  if (keys.length === 0) {
+    return [validateEncryptionKey()];
+  }
+  return keys;
 }
 
 // 12 bytes is the NIST-recommended IV length for GCM — keeps the
@@ -74,7 +107,7 @@ export function encrypt(text: string): string {
 }
 
 export function decrypt(encryptedText: string): string {
-  const keyBuffer = getEncryptionKeyBuffer()
+  const keyBuffers = getCandidateKeyBuffers()
   const parts = encryptedText.split(':')
 
   if (parts.length === 3) {
@@ -92,15 +125,24 @@ export function decrypt(encryptedText: string): string {
         `Encrypted token has unexpected GCM auth-tag length ${authTag.length}`,
       )
     }
-    const decipher = crypto.createDecipheriv(
-      'aes-256-gcm',
-      keyBuffer,
-      iv,
-    )
-    decipher.setAuthTag(authTag)
-    let decrypted = decipher.update(ctHex, 'hex', 'utf8')
-    decrypted += decipher.final('utf8')
-    return decrypted
+
+    let lastError: unknown = null
+    for (const keyBuffer of keyBuffers) {
+      try {
+        const decipher = crypto.createDecipheriv(
+          'aes-256-gcm',
+          keyBuffer,
+          iv,
+        )
+        decipher.setAuthTag(authTag)
+        let decrypted = decipher.update(ctHex, 'hex', 'utf8')
+        decrypted += decipher.final('utf8')
+        return decrypted
+      } catch (err) {
+        lastError = err
+      }
+    }
+    throw lastError
   }
 
   if (parts.length === 2) {
@@ -112,14 +154,23 @@ export function decrypt(encryptedText: string): string {
         `Encrypted token has unexpected CBC IV length ${iv.length}`,
       )
     }
-    const decipher = crypto.createDecipheriv(
-      'aes-256-cbc',
-      keyBuffer,
-      iv,
-    )
-    let decrypted = decipher.update(ctHex, 'hex', 'utf8')
-    decrypted += decipher.final('utf8')
-    return decrypted
+
+    let lastError: unknown = null
+    for (const keyBuffer of keyBuffers) {
+      try {
+        const decipher = crypto.createDecipheriv(
+          'aes-256-cbc',
+          keyBuffer,
+          iv,
+        )
+        let decrypted = decipher.update(ctHex, 'hex', 'utf8')
+        decrypted += decipher.final('utf8')
+        return decrypted
+      } catch (err) {
+        lastError = err
+      }
+    }
+    throw lastError
   }
 
   throw new Error(

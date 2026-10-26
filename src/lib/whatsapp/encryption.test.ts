@@ -145,4 +145,49 @@ describe("encryption", () => {
       expect(() => validateEncryptionKey(nonHex)).toThrow(/Must be exactly 64 hexadecimal characters/);
     });
   });
+
+  describe("candidate key rotation & fallback", () => {
+    it("decrypts ciphertext generated with a secondary key when multiple keys are configured", () => {
+      const key1 = "1111111111111111111111111111111111111111111111111111111111111111";
+      const key2 = "2222222222222222222222222222222222222222222222222222222222222222";
+
+      const iv = crypto.randomBytes(12);
+      const cipher = crypto.createCipheriv("aes-256-gcm", Buffer.from(key2, "hex"), iv);
+      let ct = cipher.update("secret-token-key-2", "utf8", "hex");
+      ct += cipher.final("hex");
+      const tag = cipher.getAuthTag();
+      const encryptedWithKey2 = `${iv.toString("hex")}:${ct}:${tag.toString("hex")}`;
+
+      const origEnv = process.env.ENCRYPTION_KEY;
+      try {
+        process.env.ENCRYPTION_KEY = `${key1},${key2}`;
+        expect(decrypt(encryptedWithKey2)).toBe("secret-token-key-2");
+      } finally {
+        process.env.ENCRYPTION_KEY = origEnv;
+      }
+    });
+
+    it("decrypts ciphertext using PREVIOUS_ENCRYPTION_KEY fallback", () => {
+      const primary = "3333333333333333333333333333333333333333333333333333333333333333";
+      const previous = "4444444444444444444444444444444444444444444444444444444444444444";
+
+      const iv = crypto.randomBytes(12);
+      const cipher = crypto.createCipheriv("aes-256-gcm", Buffer.from(previous, "hex"), iv);
+      let ct = cipher.update("legacy-rotated-secret", "utf8", "hex");
+      ct += cipher.final("hex");
+      const tag = cipher.getAuthTag();
+      const blob = `${iv.toString("hex")}:${ct}:${tag.toString("hex")}`;
+
+      const origEnv = process.env.ENCRYPTION_KEY;
+      const origPrev = process.env.PREVIOUS_ENCRYPTION_KEY;
+      try {
+        process.env.ENCRYPTION_KEY = primary;
+        process.env.PREVIOUS_ENCRYPTION_KEY = previous;
+        expect(decrypt(blob)).toBe("legacy-rotated-secret");
+      } finally {
+        process.env.ENCRYPTION_KEY = origEnv;
+        process.env.PREVIOUS_ENCRYPTION_KEY = origPrev;
+      }
+    });
+  });
 });

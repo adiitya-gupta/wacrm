@@ -70,11 +70,22 @@ export async function loadAiConfig(
     }
   }
 
+  let apiKey: string
+  try {
+    apiKey = decrypt(row.api_key)
+  } catch (err) {
+    console.error(
+      `[ai config] API key for account ${accountId} could not be decrypted — check ENCRYPTION_KEY or re-enter key in AI Settings:`,
+      err instanceof Error ? err.message : err,
+    )
+    throw err
+  }
+
   return {
     provider: row.provider,
     model: row.model,
     baseUrl: row.base_url,
-    apiKey: decrypt(row.api_key),
+    apiKey,
     systemPrompt: row.system_prompt,
     isActive: row.is_active,
     autoReplyEnabled: row.auto_reply_enabled,

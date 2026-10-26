@@ -549,6 +549,59 @@ describe('POST /api/whatsapp/embedded-signup', () => {
         'whatsapp_business_messaging',
       ]);
     });
+
+    it('emits safe diagnostic log and rejection branch label without sensitive payloads', async () => {
+      setupAuthMock('admin');
+
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      vi.spyOn(metaApi, 'exchangeOAuthCode').mockResolvedValue({
+        accessToken: 'EAAB_token_diagnostic',
+        tokenType: 'bearer',
+      });
+      vi.spyOn(metaApi, 'debugToken').mockResolvedValue({
+        isValid: true,
+        expiresAt: 0,
+        scopes: ['public_profile', 'email'],
+        granularScopes: [
+          { scope: 'whatsapp_business_messaging', targetIds: ['123456789'] },
+        ],
+      });
+
+      const req = new Request('http://localhost/api/whatsapp/embedded-signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          code: 'valid_code',
+          waba_id: '123456789',
+        }),
+      });
+
+      const res = await POST(req);
+      expect(res.status).toBe(400);
+
+      expect(logSpy).toHaveBeenCalledWith(
+        '[embedded-signup] debug_token scope evaluation:',
+        {
+          isValid: true,
+          scopes: ['public_profile', 'email'],
+          granularScopes: ['whatsapp_business_messaging'],
+          hasManagementInScopes: false,
+          hasManagementInGranularScopes: false,
+          hasMessagingInScopes: false,
+          hasMessagingInGranularScopes: true,
+        }
+      );
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[embedded-signup] validation rejected at REQUIRED_SCOPES_VALIDATION_HTTP_400:',
+        {
+          branch: 'REQUIRED_SCOPES_VALIDATION_HTTP_400',
+          missingScopes: ['whatsapp_business_management'],
+        }
+      );
+    });
   });
 
   it('returns 409 Conflict when phone number is already claimed by another tenant', async () => {

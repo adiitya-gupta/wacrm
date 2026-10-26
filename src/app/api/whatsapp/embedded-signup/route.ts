@@ -181,12 +181,33 @@ export async function POST(request: Request) {
       }
     }
 
+    const scopeNames = (tokenData.scopes || [])
+      .map((s) => (typeof s === 'string' ? s.trim() : ''))
+      .filter(Boolean);
+    const granularScopeNames = (tokenData.granularScopes || [])
+      .map((gs) => (typeof gs?.scope === 'string' ? gs.scope.trim() : ''))
+      .filter(Boolean);
+
+    console.log('[embedded-signup] debug_token scope evaluation:', {
+      isValid: Boolean(tokenData.isValid),
+      scopes: scopeNames,
+      granularScopes: granularScopeNames,
+      hasManagementInScopes: scopeNames.includes('whatsapp_business_management'),
+      hasManagementInGranularScopes: granularScopeNames.includes('whatsapp_business_management'),
+      hasMessagingInScopes: scopeNames.includes('whatsapp_business_messaging'),
+      hasMessagingInGranularScopes: granularScopeNames.includes('whatsapp_business_messaging'),
+    });
+
     const grantedScopes = new Set<string>([
-      ...(tokenData.scopes || []).map((s) => (typeof s === 'string' ? s.trim() : '')).filter(Boolean),
-      ...((tokenData.granularScopes || []).map((gs) => (typeof gs?.scope === 'string' ? gs.scope.trim() : '')).filter(Boolean)),
+      ...scopeNames,
+      ...granularScopeNames,
     ]);
     const missingScopes = REQUIRED_SCOPES.filter((scope) => !grantedScopes.has(scope));
     if (missingScopes.length > 0) {
+      console.warn('[embedded-signup] validation rejected at REQUIRED_SCOPES_VALIDATION_HTTP_400:', {
+        branch: 'REQUIRED_SCOPES_VALIDATION_HTTP_400',
+        missingScopes,
+      });
       return NextResponse.json(
         {
           error: `Missing required WhatsApp permissions: ${missingScopes.join(', ')}. Please complete signup with full management permissions.`,

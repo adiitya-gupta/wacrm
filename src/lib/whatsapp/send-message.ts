@@ -278,7 +278,20 @@ export async function sendMessageToConversation(
     );
   }
 
-  const accessToken = decrypt(config.access_token);
+  let accessToken: string;
+  try {
+    accessToken = decrypt(config.access_token);
+  } catch (err) {
+    console.error(
+      `[send-message] Decryption failed for credential 'whatsapp_config.access_token' (account: ${accountId}, phone_number_id: ${config.phone_number_id}): check that ENCRYPTION_KEY matches the key used when saving WhatsApp settings:`,
+      err instanceof Error ? err.message : err,
+    );
+    throw new SendMessageError(
+      'whatsapp_token_decryption_failed',
+      'Failed to decrypt WhatsApp access token. Check ENCRYPTION_KEY or re-save WhatsApp configuration.',
+      500,
+    );
+  }
 
   // Self-heal legacy CBC ciphertexts. Fire-and-forget; idempotent.
   if (isLegacyFormat(config.access_token)) {

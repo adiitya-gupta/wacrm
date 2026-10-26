@@ -53,9 +53,19 @@ export async function loadAccountMetaCredentials(
   if (configErr || !config) {
     throw new Error(t('send.notConfigured'))
   }
+  let accessToken: string
+  try {
+    accessToken = decrypt(config.access_token)
+  } catch (err) {
+    console.error(
+      `[meta-send] Decryption failed for credential 'whatsapp_config.access_token' (account: ${accountId}, phone_number_id: ${config.phone_number_id}): check that ENCRYPTION_KEY matches the key used when saving WhatsApp settings:`,
+      err instanceof Error ? err.message : err,
+    )
+    throw err
+  }
   return {
     phoneNumberId: config.phone_number_id,
-    accessToken: decrypt(config.access_token),
+    accessToken,
   }
 }
 

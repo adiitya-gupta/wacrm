@@ -157,7 +157,16 @@ async function sendViaMeta(input: SendInput): Promise<{ whatsapp_message_id: str
     throw new Error(t('send.notConfigured'))
   }
 
-  const accessToken = decrypt(config.access_token)
+  let accessToken: string
+  try {
+    accessToken = decrypt(config.access_token)
+  } catch (err) {
+    console.error(
+      `[automations-send] Decryption failed for credential 'whatsapp_config.access_token' (account: ${input.accountId}, phone_number_id: ${config.phone_number_id}): check that ENCRYPTION_KEY matches the key used when saving WhatsApp settings:`,
+      err instanceof Error ? err.message : err,
+    )
+    throw err
+  }
 
   // Local template row. A missing row is fine: the send still goes
   // out, we just can't reconstruct the text the customer saw.

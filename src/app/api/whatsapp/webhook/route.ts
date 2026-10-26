@@ -382,7 +382,16 @@ async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
       }
 
       const config = resolvedConfig
-      const decryptedAccessToken = decrypt(config.access_token as string)
+      let decryptedAccessToken: string
+      try {
+        decryptedAccessToken = decrypt(config.access_token as string)
+      } catch (err) {
+        console.error(
+          `[webhook] Decryption failed for credential 'whatsapp_config.access_token' (account: ${resolvedAccountId}, phone_number_id: ${phoneNumberId}): check that ENCRYPTION_KEY matches the key used when saving WhatsApp settings:`,
+          err instanceof Error ? err.message : err,
+        )
+        continue
+      }
 
       for (let i = 0; i < value.messages.length; i++) {
         const message = value.messages[i]

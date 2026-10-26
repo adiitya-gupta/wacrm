@@ -15,6 +15,7 @@ interface MockConfigRow {
 
 let mockConfigs: MockConfigRow[] = []
 const messageUpdates: Array<{ id: string; accountId: string; patch: Record<string, unknown> }> = []
+const mockTargetMessages = new Map<string, string>()
 
 let pendingAfter: Promise<unknown> | null = null
 
@@ -52,6 +53,7 @@ vi.mock('@supabase/supabase-js', () => ({
       if (table === 'messages') {
         let filterMsgId: string | null = null
         let filterAccountId: string | null = null
+        let updateId: string | null = null
         let currentPatch: Record<string, unknown> = {}
 
         const builder = {
@@ -62,16 +64,32 @@ vi.mock('@supabase/supabase-js', () => ({
           }),
           eq: vi.fn((col: string, val: string) => {
             if (col === 'message_id') filterMsgId = val
-            if (col === 'account_id') filterAccountId = val
+            if (col === 'account_id' || col === 'conversations.account_id') filterAccountId = val
+            if (col === 'id') updateId = val
             return builder
           }),
           limit: vi.fn(() => builder),
-          maybeSingle: vi.fn(async () => ({ data: null, error: null })),
-          then: vi.fn((resolve: (res: { data: unknown; error: unknown }) => unknown) => {
+          maybeSingle: vi.fn(async () => {
             if (filterMsgId && filterAccountId) {
+              mockTargetMessages.set(filterMsgId, filterAccountId)
+              return {
+                data: {
+                  id: filterMsgId,
+                  conversation_id: 'conv-1',
+                  conversations: { account_id: filterAccountId },
+                },
+                error: null,
+              }
+            }
+            return { data: null, error: null }
+          }),
+          then: vi.fn((resolve: (res: { data: unknown; error: unknown }) => unknown) => {
+            const resolvedId = updateId || filterMsgId
+            const resolvedAccount = (resolvedId && mockTargetMessages.get(resolvedId)) || filterAccountId
+            if (resolvedId && currentPatch.status) {
               messageUpdates.push({
-                id: filterMsgId,
-                accountId: filterAccountId,
+                id: resolvedId,
+                accountId: resolvedAccount || '',
                 patch: currentPatch,
               })
             }
@@ -95,6 +113,18 @@ vi.mock('@supabase/supabase-js', () => ({
         return builder
       }
 
+      if (table === 'webhook_endpoints') {
+        const builder = {
+          select: vi.fn(() => builder),
+          eq: vi.fn(() => builder),
+          contains: vi.fn(() => builder),
+          then: vi.fn((resolve: (res: { data: unknown; error: unknown }) => unknown) =>
+            Promise.resolve(resolve({ data: [], error: null }))
+          ),
+        }
+        return builder
+      }
+
       return {
         select: vi.fn().mockResolvedValue({ data: null, error: null }),
         update: vi.fn().mockReturnValue({ eq: vi.fn().mockReturnValue({ then: vi.fn() }) }),
@@ -110,6 +140,7 @@ describe('WhatsApp Webhook GET Verification (Platform-Level)', () => {
   beforeEach(() => {
     mockConfigs = []
     messageUpdates.length = 0
+    mockTargetMessages.clear()
     __resetWebhookAdminClientForTests()
     process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://test-project.supabase.co'
     process.env.SUPABASE_SERVICE_ROLE_KEY = 'test_service_role_key'

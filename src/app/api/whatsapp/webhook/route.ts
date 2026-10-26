@@ -376,7 +376,10 @@ async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
 
       // Handle incoming messages
       if (!value.messages || !value.contacts) continue
-      if (!resolvedConfig || !resolvedAccountId) continue
+      if (!resolvedConfig || !resolvedAccountId) {
+        console.warn('[webhook] Dropping incoming message: phone_number_id could not be resolved to an active config:', phoneNumberId)
+        continue
+      }
 
       const config = resolvedConfig
       const decryptedAccessToken = decrypt(config.access_token as string)
@@ -477,31 +480,40 @@ async function handleStatusUpdate(
     )
   }
 
-  // 1) Mirror onto messages (tenant-isolated)
+  // 1) Mirror onto messages (tenant-isolated via parent conversation)
   const messageUpdate: Record<string, unknown> = { status: status.status }
   if (failure) {
     messageUpdate.error_code = failure.code
     messageUpdate.error_title = failure.title
     messageUpdate.error_details = failure.details
   }
-  const { error: msgErr } = await supabaseAdmin()
+  const { data: targetMessage } = await supabaseAdmin()
     .from('messages')
-    .update(messageUpdate)
+    .select('id, conversation_id, conversations!inner(account_id)')
     .eq('message_id', status.id)
-    .eq('account_id', accountId)
+    .eq('conversations.account_id', accountId)
+    .limit(1)
+    .maybeSingle()
 
-  if (msgErr) {
-    console.error('Error updating message status:', msgErr)
+  if (targetMessage) {
+    const { error: msgErr } = await supabaseAdmin()
+      .from('messages')
+      .update(messageUpdate)
+      .eq('id', targetMessage.id)
+
+    if (msgErr) {
+      console.error('Error updating message status:', msgErr)
+    }
   }
 
-  // 2) Mirror onto broadcast_recipients via whatsapp_message_id (tenant-isolated)
+  // 2) Mirror onto broadcast_recipients via whatsapp_message_id (tenant-isolated via parent broadcast)
   const tsIso = new Date(parseInt(status.timestamp) * 1000).toISOString()
 
   const { data: recipient, error: recFetchErr } = await supabaseAdmin()
     .from('broadcast_recipients')
-    .select('id, status')
+    .select('id, status, broadcasts!inner(account_id)')
     .eq('whatsapp_message_id', status.id)
-    .eq('account_id', accountId)
+    .eq('broadcasts.account_id', accountId)
     .maybeSingle()
 
   if (recFetchErr) {
@@ -526,7 +538,6 @@ async function handleStatusUpdate(
       .from('broadcast_recipients')
       .update(update)
       .eq('id', recipient.id)
-      .eq('account_id', accountId)
 
     if (recUpdateErr) {
       console.error('Error updating broadcast recipient status:', recUpdateErr)
@@ -534,22 +545,14 @@ async function handleStatusUpdate(
   }
 
   // 3) Webhook fan-out for messages we store (inbox / API sends), scoped to accountId.
-  const { data: msgRow } = await supabaseAdmin()
-    .from('messages')
-    .select('conversation_id')
-    .eq('message_id', status.id)
-    .eq('account_id', accountId)
-    .limit(1)
-    .maybeSingle()
-
-  if (msgRow) {
+  if (targetMessage) {
     await dispatchWebhookEvent(
       supabaseAdmin(),
       accountId,
       'message.status_updated',
       {
         whatsapp_message_id: status.id,
-        conversation_id: msgRow.conversation_id,
+        conversation_id: targetMessage.conversation_id,
         status: status.status,
       }
     )
@@ -813,7 +816,6 @@ async function processMessage(
     .from('messages')
     .upsert(
       {
-        account_id: accountId,
         conversation_id: conversation.id,
         sender_type: 'customer',
         content_type: contentType,
@@ -1002,6 +1004,7 @@ async function processMessage(
   // the webhook dispatch below); `dispatchInboundToAiReply` owns its
   // eligibility gates + try/catch and never throws.
   if (!contentConsumed && !interactiveReplyId && inboundText.trim()) {
+    console.info(`[webhook] dispatching inbound message ${message.id} to AI auto-reply (account: ${accountId}, conversation: ${conversation.id})`)
     await dispatchInboundToAiReply({
       accountId,
       conversationId: conversation.id,
@@ -1011,6 +1014,12 @@ async function processMessage(
       // the reply is generated.
       inboundMessageId: message.id,
     })
+  } else if (!inboundText.trim()) {
+    console.info(`[webhook] skipping AI auto-reply: message ${message.id} has no text content`)
+  } else if (interactiveReplyId) {
+    console.info(`[webhook] skipping AI auto-reply: message ${message.id} is an interactive reply (${interactiveReplyId})`)
+  } else if (contentConsumed) {
+    console.info(`[webhook] skipping AI auto-reply: message ${message.id} was consumed by ${flowConsumed ? 'flow' : 'automation'}`)
   }
 
   // message.received webhook (public API). Awaited — not fire-and-forget

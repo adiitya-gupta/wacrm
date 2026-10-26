@@ -77,7 +77,10 @@ export async function dispatchInboundToAiReply(
     const db = supabaseAdmin()
 
     const config = await loadAiConfig(db, accountId)
-    if (!config || !config.autoReplyEnabled) return
+    if (!config || !config.autoReplyEnabled) {
+      console.info(`[ai auto-reply] skipping: account ${accountId} auto-reply is disabled or config missing`)
+      return
+    }
 
     // Deterministic, user-configured responders win over the LLM — the
     // caller already excludes messages a Flow consumed. Message-level
@@ -94,22 +97,40 @@ export async function dispatchInboundToAiReply(
       .eq('is_active', true)
       .in('trigger_type', ['new_message_received', 'keyword_match'])
       .limit(1)
-    if (autoResponders && autoResponders.length > 0) return
+    if (autoResponders && autoResponders.length > 0) {
+      console.info(`[ai auto-reply] skipping: account ${accountId} has ${autoResponders.length} active message-level automation(s)`)
+      return
+    }
 
     const { data: conv, error: convErr } = await db
       .from('conversations')
       .select('assigned_agent_id, ai_autoreply_disabled, ai_reply_count')
       .eq('id', conversationId)
       .maybeSingle()
-    if (convErr || !conv) return
-    if (conv.assigned_agent_id) return // a human owns this thread
-    if (conv.ai_autoreply_disabled) return // handed off / turned off here
+    if (convErr || !conv) {
+      console.warn(`[ai auto-reply] skipping: conversation ${conversationId} query failed or not found:`, convErr)
+      return
+    }
+    if (conv.assigned_agent_id) {
+      console.info(`[ai auto-reply] skipping: conversation ${conversationId} is owned by human agent ${conv.assigned_agent_id}`)
+      return
+    }
+    if (conv.ai_autoreply_disabled) {
+      console.info(`[ai auto-reply] skipping: auto-reply is disabled for conversation ${conversationId} (prior handoff)`)
+      return
+    }
     // Cheap early-out; the authoritative cap check is the atomic claim
     // below (this read can race a concurrent inbound).
-    if (conv.ai_reply_count >= config.autoReplyMaxPerConversation) return
+    if (conv.ai_reply_count >= config.autoReplyMaxPerConversation) {
+      console.info(`[ai auto-reply] skipping: conversation ${conversationId} reached cap (${conv.ai_reply_count}/${config.autoReplyMaxPerConversation})`)
+      return
+    }
 
     const messages = await buildConversationContext(db, conversationId)
-    if (messages.length === 0) return
+    if (messages.length === 0) {
+      console.info(`[ai auto-reply] skipping: conversation ${conversationId} has no message history`)
+      return
+    }
 
     // Account-wide throttle on the shared BYO key. The per-conversation
     // cap bounds one thread; this bounds a burst across many threads (a
@@ -240,13 +261,7 @@ export async function dispatchInboundToAiReply(
     }
 
     if (handoff || !text) {
-      // The model can't (or shouldn't) answer — stop auto-replying on
-      // this thread and hand it to a human. We (a) pause the bot here
-      // (sticky until re-enabled), (b) route the conversation to the
-      // configured handoff agent — null leaves it in the shared queue —
-      // and (c) leave a short internal note so whoever picks it up has
-      // context. Assigning fires the `on_conversation_assigned` trigger,
-      // which notifies the agent.
+      console.info(`[ai auto-reply] handing off conversation ${conversationId} to human (handoff=${handoff}, emptyText=${!text})`)
       const summary = buildHandoffSummary({
         messages,
         replyCount: conv.ai_reply_count ?? 0,
@@ -284,8 +299,12 @@ export async function dispatchInboundToAiReply(
       console.error('[ai auto-reply] claim_ai_reply_slot failed:', claimErr)
       return
     }
-    if (claimed !== true) return // lost the per-conversation cap race
+    if (claimed !== true) {
+      console.warn(`[ai auto-reply] skipping: lost cap race for conversation ${conversationId}`)
+      return
+    }
 
+    console.info(`[ai auto-reply] sending generated reply (${text.length} chars) to conversation ${conversationId}`)
     await engineSendText({
       accountId,
       userId: configOwnerUserId,

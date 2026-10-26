@@ -750,6 +750,14 @@ export function MessageThread({
         if (!res.ok) {
           const reason = payload?.error || `HTTP ${res.status}`;
           console.error("Failed to send template:", reason);
+          if (payload?.whatsapp_message_id) {
+            toast.warning(reason);
+            onUpdateMessage(tempId, {
+              status: "sent",
+              message_id: payload.whatsapp_message_id,
+            });
+            return;
+          }
           toast.error(t("sendTemplateFailed", { reason }));
           onUpdateMessage(tempId, { status: "failed" });
           return;

@@ -292,3 +292,32 @@ describe('dispatchInboundToAiReply — handoff', () => {
     })
   })
 })
+
+describe('dispatchInboundToAiReply — provider errors & outbound failures', () => {
+  it('catches and logs AI generation errors without throwing or crashing webhook', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    h.generateReply.mockRejectedValue(new Error('Cloudflare AI 500 internal server error'))
+
+    await expect(dispatchInboundToAiReply(ARGS)).resolves.not.toThrow()
+    expect(h.engineSendText).not.toHaveBeenCalled()
+    expect(errorSpy).toHaveBeenCalledWith(
+      '[ai auto-reply] dispatch failed:',
+      expect.any(Error)
+    )
+    errorSpy.mockRestore()
+  })
+
+  it('catches outbound engineSendText errors without crashing caller', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    h.generateReply.mockResolvedValue({ text: 'Hello! How can I help you?', handoff: false })
+    h.engineSendText.mockRejectedValue(new Error('Meta send failure or DB constraint error'))
+
+    await expect(dispatchInboundToAiReply(ARGS)).resolves.not.toThrow()
+    expect(h.engineSendText).toHaveBeenCalledTimes(1)
+    expect(errorSpy).toHaveBeenCalledWith(
+      '[ai auto-reply] dispatch failed:',
+      expect.any(Error)
+    )
+    errorSpy.mockRestore()
+  })
+})

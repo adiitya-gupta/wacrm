@@ -79,23 +79,24 @@ describe('Phase 2: Multi-Tenant Isolation & Security Hardening', () => {
   });
 
   describe('3. WhatsApp Webhook Cross-Tenant Isolation', () => {
-    it('verifies that status update query scopes by account_id', () => {
-      // Simulates database query builders to verify account_id filter is mandatory
-      const updateCalls: Array<{ table: string; updates: Record<string, unknown>; filters: Record<string, unknown> }> = [];
+    it('verifies that status update query scopes by conversations.account_id', () => {
+      // Simulates database query builders to verify tenant-isolation filter is mandatory
+      const selectCalls: Array<{ table: string; select: string; filters: Record<string, unknown> }> = [];
 
       function createMockDb() {
         return {
           from: (table: string) => {
             const filters: Record<string, unknown> = {};
             const query = {
-              update: (updates: Record<string, unknown>) => {
-                updateCalls.push({ table, updates, filters });
+              select: (cols: string) => {
+                selectCalls.push({ table, select: cols, filters });
                 return query;
               },
               eq: (col: string, val: unknown) => {
                 filters[col] = val;
                 return query;
               },
+              limit: (_count?: number) => query,
               maybeSingle: async () => ({ data: null, error: null }),
             };
             return query;
@@ -108,16 +109,17 @@ describe('Phase 2: Multi-Tenant Isolation & Security Hardening', () => {
       const tenantA = 'account-tenant-a-uuid';
       const tenantB = 'account-tenant-b-uuid';
 
-      // Tenant A status update
+      // Tenant A status lookup via parent conversation
       db.from('messages')
-        .update({ status: 'delivered' })
+        .select('id, conversation_id, conversations!inner(account_id)')
         .eq('message_id', statusId)
-        .eq('account_id', tenantA);
+        .eq('conversations.account_id', tenantA)
+        .limit(1);
 
-      expect(updateCalls).toHaveLength(1);
-      expect(updateCalls[0].filters['message_id']).toBe(statusId);
-      expect(updateCalls[0].filters['account_id']).toBe(tenantA);
-      expect(updateCalls[0].filters['account_id']).not.toBe(tenantB);
+      expect(selectCalls).toHaveLength(1);
+      expect(selectCalls[0].filters['message_id']).toBe(statusId);
+      expect(selectCalls[0].filters['conversations.account_id']).toBe(tenantA);
+      expect(selectCalls[0].filters['conversations.account_id']).not.toBe(tenantB);
     });
   });
 

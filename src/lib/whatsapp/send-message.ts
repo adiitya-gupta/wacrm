@@ -66,11 +66,18 @@ export const VALID_MESSAGE_TYPES = [
 export class SendMessageError extends Error {
   readonly code: string;
   readonly status: number;
-  constructor(code: string, message: string, status: number) {
+  readonly whatsappMessageId?: string;
+  constructor(
+    code: string,
+    message: string,
+    status: number,
+    whatsappMessageId?: string
+  ) {
     super(message);
     this.name = 'SendMessageError';
     this.code = code;
     this.status = status;
+    this.whatsappMessageId = whatsappMessageId;
   }
 }
 
@@ -478,14 +485,13 @@ export async function sendMessageToConversation(
   const { data: messageRecord, error: msgError } = await db
     .from('messages')
     .insert({
-      account_id: accountId,
       conversation_id: conversationId,
       sender_type: 'agent',
       content_type: messageType,
       content_text: persistedText,
       media_url:
         messageType === 'template'
-          ? templateHeaderMediaUrl(templateRow, templateMessageParams)
+           ? templateHeaderMediaUrl(templateRow, templateMessageParams)
           : mediaUrl || null,
       template_name: templateName || null,
       interactive_payload:
@@ -501,8 +507,9 @@ export async function sendMessageToConversation(
     console.error('[send-message] error inserting sent message:', msgError);
     throw new SendMessageError(
       'db_error',
-      `Message sent to Meta but failed to save to DB: ${msgError.message}`,
-      500
+      `Message sent to Meta (ID: ${waMessageId}) but failed to save to DB: ${msgError.message}`,
+      500,
+      waMessageId
     );
   }
 

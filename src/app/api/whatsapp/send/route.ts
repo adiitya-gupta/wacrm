@@ -190,7 +190,11 @@ export async function POST(request: Request) {
     } catch (err) {
       if (err instanceof SendMessageError) {
         return NextResponse.json(
-          { error: err.message },
+          {
+            error: err.message,
+            code: err.code,
+            whatsapp_message_id: err.whatsappMessageId,
+          },
           { status: err.status }
         )
       }

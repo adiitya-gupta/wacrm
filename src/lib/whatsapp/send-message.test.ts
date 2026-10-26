@@ -483,3 +483,83 @@ describe('sendMessageToConversation — BSUID recipients (#519)', () => {
     ).rejects.toThrow(/no phone number or WhatsApp user ID/);
   });
 });
+
+describe('sendMessageToConversation — schema compliance & partial failure resilience', () => {
+  it('does NOT include account_id on messages insert payload (matching live database schema)', async () => {
+    const captured: CapturedWrites = {};
+    const { sendTextMessage } = await import('@/lib/whatsapp/meta-api');
+    vi.mocked(sendTextMessage).mockClear();
+
+    await sendMessageToConversation(
+      sendPathDb([], captured, { id: 'ct-1', phone: '+15551234567' }),
+      'acct-1',
+      { conversationId: 'cv-1', messageType: 'text', contentText: 'hello world' }
+    );
+
+    expect(captured.message).toBeDefined();
+    expect(captured.message).not.toHaveProperty('account_id');
+    expect(captured.message?.conversation_id).toBe('cv-1');
+    expect(captured.message?.content_text).toBe('hello world');
+    expect(captured.message?.status).toBe('sent');
+  });
+
+  it('truthfully reports partial failure with Meta whatsappMessageId when DB insert fails', async () => {
+    const captured: CapturedWrites = {};
+    sendTemplateMessage.mockResolvedValueOnce({
+      messageId: 'wamid.HBgM_TEST_PARTIAL_999',
+    });
+
+    const explodingDb = {
+      from(table: string) {
+        const builder: Record<string, unknown> = {
+          select: () => builder,
+          eq: () => builder,
+          insert: (row: Record<string, unknown>) => {
+            if (table === 'messages') captured.message = row;
+            return builder;
+          },
+          single: async () => {
+            if (table === 'conversations') {
+              return { data: { id: 'cv-1', contact: { id: 'ct-1', phone: '+15551234567' } }, error: null };
+            }
+            if (table === 'whatsapp_config') {
+              return { data: { id: 'cfg-1', phone_number_id: 'pn-1', access_token: 'token' }, error: null };
+            }
+            if (table === 'messages') {
+              return {
+                data: null,
+                error: { message: "Could not find the 'account_id' column of 'messages' in the schema cache" },
+              };
+            }
+            return { data: null, error: null };
+          },
+          then: (resolve: (r: { data: unknown[]; error: null }) => unknown) =>
+            resolve({
+              data: table === 'message_templates' ? [TEMPLATE_ROW] : [],
+              error: null,
+            }),
+        };
+        return builder;
+      },
+    } as unknown as SupabaseClient;
+
+    try {
+      await sendMessageToConversation(explodingDb, 'acct-1', {
+        conversationId: 'cv-1',
+        messageType: 'template',
+        templateName: 'order_update',
+        templateLanguage: 'en',
+      });
+      expect.fail('Should have thrown SendMessageError');
+    } catch (err) {
+      expect(err).toBeInstanceOf(SendMessageError);
+      const sendErr = err as SendMessageError;
+      expect(sendErr.code).toBe('db_error');
+      expect(sendErr.status).toBe(500);
+      expect(sendErr.whatsappMessageId).toBe('wamid.HBgM_TEST_PARTIAL_999');
+      expect(sendErr.message).toContain(
+        'Message sent to Meta (ID: wamid.HBgM_TEST_PARTIAL_999) but failed to save to DB'
+      );
+    }
+  });
+});

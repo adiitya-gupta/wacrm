@@ -2,7 +2,21 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
-import { Loader2, Sparkles, CheckCircle2, Trash2, Eye, EyeOff } from 'lucide-react';
+import {
+  Loader2,
+  Sparkles,
+  CheckCircle2,
+  Trash2,
+  Eye,
+  EyeOff,
+  Briefcase,
+  GitBranch,
+  FileText,
+  DollarSign,
+  Smile,
+  KeyRound,
+  Save,
+} from 'lucide-react';
 import { useAuth } from '@/hooks/use-auth';
 import { canEditSettings } from '@/lib/auth/roles';
 import { Button } from '@/components/ui/button';
@@ -24,18 +38,31 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { SettingsPanelHead } from './settings-panel-head';
 import { AiKnowledgeCard } from './ai-knowledge';
-import { AI_PROVIDER_DEFAULT_MODEL } from '@/lib/ai/defaults';
-import type { AiProvider } from '@/lib/ai/types';
+import { AiBusinessProfileEditor } from './ai-business-profile';
+import { AiFlowSettings } from './ai-flow-settings';
+import { AiTemplatesEditor } from './ai-templates-editor';
+import { AiPricingSettings } from './ai-pricing-settings';
+import { AiPersonalitySettings } from './ai-personality-settings';
+import {
+  AI_PROVIDER_DEFAULT_MODEL,
+  DEFAULT_AI_BUSINESS_PROFILE,
+  DEFAULT_AI_CONVERSATION_FLOW,
+  DEFAULT_AI_MESSAGE_TEMPLATES,
+} from '@/lib/ai/defaults';
+import type {
+  AiProvider,
+  AiBusinessProfile,
+  AiConversationFlowConfig,
+  AiMessageTemplates,
+} from '@/lib/ai/types';
 import type { AccountMember } from '@/types';
 import { fetchAccountMembers, memberLabel } from '@/lib/account/members';
 import { useTranslations } from 'next-intl';
 
 const MASKED_KEY = '••••••••••••••••';
-
-// Radix Select can't use an empty-string item value, so the "leave
-// unassigned" choice gets a sentinel that maps to null in the payload.
 const HANDOFF_QUEUE = '__queue__';
 
 const PROVIDER_LABEL: Record<Exclude<AiProvider, 'openai_compatible'>, string> = {
@@ -49,6 +76,14 @@ const KEY_PLACEHOLDER: Record<AiProvider, string> = {
   openai_compatible: 'your-api-key',
 };
 
+type ConfigSubTab =
+  | 'profile'
+  | 'flow'
+  | 'templates'
+  | 'pricing'
+  | 'personality'
+  | 'credentials';
+
 export function AiConfig() {
   const { accountId, accountRole, profileLoading } = useAuth();
   const canEdit = accountRole ? canEditSettings(accountRole) : false;
@@ -59,6 +94,9 @@ export function AiConfig() {
   const [testing, setTesting] = useState(false);
   const [removing, setRemoving] = useState(false);
 
+  const [activeSubTab, setActiveSubTab] = useState<ConfigSubTab>('profile');
+
+  // Core Agent Credentials State
   const [configured, setConfigured] = useState(false);
   const [provider, setProvider] = useState<AiProvider>('openai');
   const [model, setModel] = useState(AI_PROVIDER_DEFAULT_MODEL.openai);
@@ -74,14 +112,19 @@ export function AiConfig() {
   const [isActive, setIsActive] = useState(false);
   const [autoReplyEnabled, setAutoReplyEnabled] = useState(false);
   const [maxPerConversation, setMaxPerConversation] = useState(3);
-  // Empty string = leave unassigned (shared queue).
   const [handoffAgentId, setHandoffAgentId] = useState('');
   const [members, setMembers] = useState<AccountMember[]>([]);
 
-  // Guard keyed on the account (not a bare boolean) so an in-place
-  // account switch — ownership transfer, multi-account membership —
-  // refetches instead of showing the previous account's config. Mirrors
-  // the loadedAccountIdRef pattern in whatsapp-config.tsx.
+  // Multi-Tenant Business Profile, Flow, and Templates State
+  const [businessProfile, setBusinessProfile] = useState<AiBusinessProfile>(
+    DEFAULT_AI_BUSINESS_PROFILE,
+  );
+  const [conversationFlow, setConversationFlow] =
+    useState<AiConversationFlowConfig>(DEFAULT_AI_CONVERSATION_FLOW);
+  const [messageTemplates, setMessageTemplates] = useState<AiMessageTemplates>(
+    DEFAULT_AI_MESSAGE_TEMPLATES,
+  );
+
   const loadedAccountIdRef = useRef<string | null>(null);
 
   const fetchConfig = useCallback(async () => {
@@ -109,6 +152,26 @@ export function AiConfig() {
         setHasStoredEmbeddingsKey(Boolean(data.has_embeddings_key));
         setEmbeddingsKey(data.has_embeddings_key ? MASKED_KEY : '');
         setEmbeddingsKeyEdited(false);
+
+        // Load multi-tenant business profile, flow, and templates if saved
+        if (data.business_profile && typeof data.business_profile === 'object') {
+          setBusinessProfile((prev) => ({
+            ...prev,
+            ...data.business_profile,
+          }));
+        }
+        if (data.conversation_flow && typeof data.conversation_flow === 'object') {
+          setConversationFlow((prev) => ({
+            ...prev,
+            ...data.conversation_flow,
+          }));
+        }
+        if (data.message_templates && typeof data.message_templates === 'object') {
+          setMessageTemplates((prev) => ({
+            ...prev,
+            ...data.message_templates,
+          }));
+        }
       }
     } catch {
       toast.error(t('loadFailed'));
@@ -121,14 +184,9 @@ export function AiConfig() {
     if (!accountId || loadedAccountIdRef.current === accountId) return;
     loadedAccountIdRef.current = accountId;
     void fetchConfig();
-    // Members populate the handoff-target picker. Best-effort — on an
-    // older deployment without the endpoint the picker just shows the
-    // queue option.
     void fetchAccountMembers().then(setMembers);
   }, [accountId, fetchConfig]);
 
-  // Swap the model default when the provider changes, unless the user
-  // typed a custom model.
   const handleProviderChange = (next: AiProvider) => {
     setProvider(next);
     const isDefaultModel =
@@ -136,12 +194,13 @@ export function AiConfig() {
       model === AI_PROVIDER_DEFAULT_MODEL.anthropic ||
       model === AI_PROVIDER_DEFAULT_MODEL.openai_compatible ||
       model.trim() === '';
-    if (isDefaultModel) setModel(next === 'openai_compatible' ? '' : AI_PROVIDER_DEFAULT_MODEL[next]);
+    if (isDefaultModel)
+      setModel(
+        next === 'openai_compatible' ? '' : AI_PROVIDER_DEFAULT_MODEL[next],
+      );
   };
 
   const keyPayload = () => (keyEdited ? apiKey.trim() : undefined);
-
-  // undefined = leave unchanged; '' typed = null (clear); text = set.
   const embeddingsKeyPayload = () =>
     embeddingsKeyEdited ? embeddingsKey.trim() || null : undefined;
 
@@ -156,6 +215,9 @@ export function AiConfig() {
     auto_reply_enabled: autoReplyEnabled,
     auto_reply_max_per_conversation: maxPerConversation,
     handoff_agent_id: handoffAgentId || null,
+    business_profile: businessProfile,
+    conversation_flow: conversationFlow,
+    message_templates: messageTemplates,
   });
 
   const handleTest = async () => {
@@ -184,14 +246,17 @@ export function AiConfig() {
   const handleSave = async () => {
     if (!model.trim()) {
       toast.error(t('missingModel'));
+      setActiveSubTab('credentials');
       return;
     }
     if (provider === 'openai_compatible' && !baseUrl.trim()) {
       toast.error(t('missingBaseUrl'));
+      setActiveSubTab('credentials');
       return;
     }
     if (!configured && !keyEdited) {
       toast.error(t('missingApiKey'));
+      setActiveSubTab('credentials');
       return;
     }
     setSaving(true);
@@ -244,8 +309,7 @@ export function AiConfig() {
   if (loading || profileLoading) {
     return (
       <div className="flex items-center justify-center py-16 text-muted-foreground">
-        <Loader2 className="mr-2 h-4 w-4 animate-spin" /> {t('loadFailed')} {/* Re-using label or a global one, wait, loading is better. Let's use useTranslations from overview or just hardcode Loading... actually I should add loading to aiConfig */}
-        {/* Wait, I didn't add loading to aiConfig. I'll just use loading. */}
+        <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading AI configuration...
       </div>
     );
   }
@@ -253,302 +317,386 @@ export function AiConfig() {
   const disabled = !canEdit || saving;
 
   return (
-    <div>
-      <SettingsPanelHead
-        title={t('title')}
-        description={t('description')}
-      />
+    <div className="space-y-6">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <SettingsPanelHead
+          title={t('title')}
+          description="Configure your multi-tenant business profile, conversational flows, verified pricing, and message templates."
+        />
+        <div className="flex items-center gap-2">
+          <Button
+            onClick={handleSave}
+            disabled={disabled}
+            className="shadow-xs"
+          >
+            {saving ? (
+              <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+            ) : (
+              <Save className="mr-1.5 h-4 w-4" />
+            )}
+            Save Configuration
+          </Button>
+        </div>
+      </div>
 
       {!canEdit && (
-        <p className="mb-4 rounded-md border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
+        <p className="rounded-md border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
           {t('adminOnlyConfig')}
         </p>
       )}
 
-      <div className="space-y-6">
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <Sparkles className="h-4 w-4 text-primary" /> {t('providerAndKey')}
-            </CardTitle>
-            <CardDescription>
-              {t('encryptionNotice')}
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="space-y-2">
-                <Label>{t('provider')}</Label>
-                <Select
-                  value={provider}
-                  onValueChange={(v) => handleProviderChange(v as AiProvider)}
-                  disabled={disabled}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="openai">{PROVIDER_LABEL.openai}</SelectItem>
-                    <SelectItem value="anthropic">
-                      {PROVIDER_LABEL.anthropic}
-                    </SelectItem>
-                    <SelectItem value="openai_compatible">
-                      {t('providerOpenAiCompatible')}
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
+      {/* Sub-tabs Navigation */}
+      <Tabs
+        value={activeSubTab}
+        onValueChange={(v) => setActiveSubTab(v as ConfigSubTab)}
+        className="space-y-6"
+      >
+        <TabsList className="grid grid-cols-2 md:grid-cols-6 h-auto p-1 bg-muted/60">
+          <TabsTrigger value="profile" className="py-2 text-xs">
+            <Briefcase className="mr-1.5 h-3.5 w-3.5" /> Business Profile
+          </TabsTrigger>
+          <TabsTrigger value="flow" className="py-2 text-xs">
+            <GitBranch className="mr-1.5 h-3.5 w-3.5" /> Flows & Stages
+          </TabsTrigger>
+          <TabsTrigger value="templates" className="py-2 text-xs">
+            <FileText className="mr-1.5 h-3.5 w-3.5" /> Message Templates
+          </TabsTrigger>
+          <TabsTrigger value="pricing" className="py-2 text-xs">
+            <DollarSign className="mr-1.5 h-3.5 w-3.5" /> Pricing & Booking
+          </TabsTrigger>
+          <TabsTrigger value="personality" className="py-2 text-xs">
+            <Smile className="mr-1.5 h-3.5 w-3.5" /> Tone & Language
+          </TabsTrigger>
+          <TabsTrigger value="credentials" className="py-2 text-xs">
+            <KeyRound className="mr-1.5 h-3.5 w-3.5" /> Model & Rules
+          </TabsTrigger>
+        </TabsList>
+
+        {/* 1. Business Profile & Knowledge */}
+        <TabsContent value="profile" className="space-y-6">
+          <AiBusinessProfileEditor
+            profile={businessProfile}
+            onChange={setBusinessProfile}
+            disabled={disabled}
+          />
+          <AiKnowledgeCard
+            accountId={accountId}
+            canEdit={canEdit}
+            hasEmbeddingsKey={
+              embeddingsKeyEdited
+                ? embeddingsKey.trim().length > 0
+                : hasStoredEmbeddingsKey
+            }
+          />
+        </TabsContent>
+
+        {/* 2. Conversation Flow */}
+        <TabsContent value="flow" className="space-y-6">
+          <AiFlowSettings
+            flowConfig={conversationFlow}
+            onChange={setConversationFlow}
+            disabled={disabled}
+          />
+        </TabsContent>
+
+        {/* 3. Message Templates */}
+        <TabsContent value="templates" className="space-y-6">
+          <AiTemplatesEditor
+            templates={messageTemplates}
+            onChange={setMessageTemplates}
+            businessName={businessProfile.businessName}
+            disabled={disabled}
+          />
+        </TabsContent>
+
+        {/* 4. Pricing & Meeting Setup */}
+        <TabsContent value="pricing" className="space-y-6">
+          <AiPricingSettings
+            profile={businessProfile}
+            onChange={setBusinessProfile}
+            disabled={disabled}
+          />
+        </TabsContent>
+
+        {/* 5. Personality & Language */}
+        <TabsContent value="personality" className="space-y-6">
+          <AiPersonalitySettings
+            profile={businessProfile}
+            onChange={setBusinessProfile}
+            disabled={disabled}
+          />
+        </TabsContent>
+
+        {/* 6. AI Model Credentials & Handoff Rules */}
+        <TabsContent value="credentials" className="space-y-6">
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-base">
+                <Sparkles className="h-4 w-4 text-primary" /> AI Model & BYO Provider Key
+              </CardTitle>
+              <CardDescription>{t('encryptionNotice')}</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="space-y-2">
+                  <Label>{t('provider')}</Label>
+                  <Select
+                    value={provider}
+                    onValueChange={(v) => handleProviderChange(v as AiProvider)}
+                    disabled={disabled}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="openai">{PROVIDER_LABEL.openai}</SelectItem>
+                      <SelectItem value="anthropic">
+                        {PROVIDER_LABEL.anthropic}
+                      </SelectItem>
+                      <SelectItem value="openai_compatible">
+                        {t('providerOpenAiCompatible')}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="ai-model">{t('model')}</Label>
+                  <Input
+                    id="ai-model"
+                    value={model}
+                    onChange={(e) => setModel(e.target.value)}
+                    placeholder={AI_PROVIDER_DEFAULT_MODEL[provider]}
+                    disabled={disabled}
+                  />
+                </div>
+
+                {provider === 'openai_compatible' && (
+                  <div className="space-y-2 sm:col-span-2">
+                    <Label htmlFor="ai-base-url">{t('baseUrl')}</Label>
+                    <Input
+                      id="ai-base-url"
+                      value={baseUrl}
+                      onChange={(e) => setBaseUrl(e.target.value)}
+                      placeholder="https://api.example.com/v1"
+                      disabled={disabled}
+                      autoComplete="off"
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      {t('baseUrlHint')}
+                    </p>
+                  </div>
+                )}
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="ai-model">{t('model')}</Label>
+                <Label htmlFor="ai-key">{t('apiKey')}</Label>
+                <div className="flex gap-2">
+                  <div className="relative flex-1">
+                    <Input
+                      id="ai-key"
+                      type={showKey ? 'text' : 'password'}
+                      value={apiKey}
+                      onChange={(e) => {
+                        setApiKey(e.target.value);
+                        setKeyEdited(true);
+                      }}
+                      onFocus={() => {
+                        if (!keyEdited && hasStoredKey) {
+                          setApiKey('');
+                          setKeyEdited(true);
+                        }
+                      }}
+                      placeholder={KEY_PLACEHOLDER[provider]}
+                      disabled={disabled}
+                      autoComplete="off"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowKey((s) => !s)}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                      tabIndex={-1}
+                    >
+                      {showKey ? (
+                        <EyeOff className="h-4 w-4" />
+                      ) : (
+                        <Eye className="h-4 w-4" />
+                      )}
+                    </button>
+                  </div>
+                  <Button
+                    variant="outline"
+                    onClick={handleTest}
+                    disabled={disabled || testing}
+                  >
+                    {testing ? (
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    ) : (
+                      <CheckCircle2 className="mr-2 h-4 w-4" />
+                    )}
+                    {t('testKey')}
+                  </Button>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="ai-embeddings-key">
+                  {t('embeddingsKey')}{' '}
+                  <span className="font-normal text-muted-foreground">
+                    {t('optionalSemanticSearch')}
+                  </span>
+                </Label>
                 <Input
-                  id="ai-model"
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                  placeholder={AI_PROVIDER_DEFAULT_MODEL[provider]}
+                  id="ai-embeddings-key"
+                  type="password"
+                  value={embeddingsKey}
+                  onChange={(e) => {
+                    setEmbeddingsKey(e.target.value);
+                    setEmbeddingsKeyEdited(true);
+                  }}
+                  onFocus={() => {
+                    if (!embeddingsKeyEdited && hasStoredEmbeddingsKey) {
+                      setEmbeddingsKey('');
+                      setEmbeddingsKeyEdited(true);
+                    }
+                  }}
+                  placeholder="sk-... (OpenAI)"
+                  disabled={disabled}
+                  autoComplete="off"
+                />
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">{t('behaviour')}</CardTitle>
+              <CardDescription>{t('behaviourDesc')}</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="space-y-2">
+                <Label htmlFor="ai-prompt">{t('businessContext')}</Label>
+                <Textarea
+                  id="ai-prompt"
+                  value={systemPrompt}
+                  onChange={(e) => setSystemPrompt(e.target.value)}
+                  placeholder={t('promptPlaceholder')}
+                  rows={4}
                   disabled={disabled}
                 />
               </div>
 
-              {provider === 'openai_compatible' && (
-                <div className="space-y-2">
-                  <Label htmlFor="ai-base-url">{t('baseUrl')}</Label>
-                  <Input
-                    id="ai-base-url"
-                    value={baseUrl}
-                    onChange={(e) => setBaseUrl(e.target.value)}
-                    placeholder="https://api.example.com/v1"
-                    disabled={disabled}
-                    autoComplete="off"
-                  />
-                  <p className="text-xs text-muted-foreground">{t('baseUrlHint')}</p>
+              <div className="flex items-center justify-between gap-4 rounded-md border border-border p-3">
+                <div>
+                  <p className="text-sm font-medium text-foreground">
+                    {t('enableAssistant')}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    {t('enableAssistantDesc')}
+                  </p>
                 </div>
-              )}
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="ai-key">{t('apiKey')}</Label>
-              <div className="flex gap-2">
-                <div className="relative flex-1">
-                  <Input
-                    id="ai-key"
-                    type={showKey ? 'text' : 'password'}
-                    value={apiKey}
-                    onChange={(e) => {
-                      setApiKey(e.target.value);
-                      setKeyEdited(true);
-                    }}
-                    onFocus={() => {
-                      if (!keyEdited && hasStoredKey) {
-                        setApiKey('');
-                        setKeyEdited(true);
-                      }
-                    }}
-                    placeholder={KEY_PLACEHOLDER[provider]}
-                    disabled={disabled}
-                    autoComplete="off"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowKey((s) => !s)}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                    tabIndex={-1}
-                  >
-                    {showKey ? (
-                      <EyeOff className="h-4 w-4" />
-                    ) : (
-                      <Eye className="h-4 w-4" />
-                    )}
-                  </button>
-                </div>
-                <Button
-                  variant="outline"
-                  onClick={handleTest}
-                  disabled={disabled || testing}
-                >
-                  {testing ? (
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  ) : (
-                    <CheckCircle2 className="mr-2 h-4 w-4" />
-                  )}
-                  {t('testKey')}
-                </Button>
+                <Switch
+                  checked={isActive}
+                  onCheckedChange={setIsActive}
+                  disabled={disabled}
+                />
               </div>
-            </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="ai-embeddings-key">
-                {t('embeddingsKey')}{' '}
-                <span className="font-normal text-muted-foreground">
-                  {t('optionalSemanticSearch')}
-                </span>
-              </Label>
-              <Input
-                id="ai-embeddings-key"
-                type="password"
-                value={embeddingsKey}
-                onChange={(e) => {
-                  setEmbeddingsKey(e.target.value);
-                  setEmbeddingsKeyEdited(true);
-                }}
-                onFocus={() => {
-                  if (!embeddingsKeyEdited && hasStoredEmbeddingsKey) {
-                    setEmbeddingsKey('');
-                    setEmbeddingsKeyEdited(true);
+              <div className="flex items-center justify-between gap-4 rounded-md border border-border p-3">
+                <div>
+                  <p className="text-sm font-medium text-foreground">
+                    {t('autoReply')}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    {t('autoReplyDesc')}
+                  </p>
+                </div>
+                <Switch
+                  checked={autoReplyEnabled}
+                  onCheckedChange={setAutoReplyEnabled}
+                  disabled={disabled || !isActive}
+                />
+              </div>
+
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <Label htmlFor="ai-max">{t('maxAutoReplies')}</Label>
+                  <p className="text-xs text-muted-foreground">
+                    {t('maxAutoRepliesDesc')}
+                  </p>
+                </div>
+                <Input
+                  id="ai-max"
+                  type="number"
+                  min={1}
+                  max={20}
+                  value={maxPerConversation}
+                  onChange={(e) =>
+                    setMaxPerConversation(
+                      Math.min(20, Math.max(1, Number(e.target.value) || 1)),
+                    )
                   }
-                }}
-                placeholder="sk-... (OpenAI)"
-                disabled={disabled}
-                autoComplete="off"
-              />
-              <p className="text-xs text-muted-foreground">
-                {t('embeddingsHint', {
-                  sameKeyText: provider === 'openai' ? t('sameKeyText') : '',
-                })}
-              </p>
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">{t('behaviour')}</CardTitle>
-            <CardDescription>
-              {t('behaviourDesc')}
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="space-y-2">
-              <Label htmlFor="ai-prompt">{t('businessContext')}</Label>
-              <Textarea
-                id="ai-prompt"
-                value={systemPrompt}
-                onChange={(e) => setSystemPrompt(e.target.value)}
-                placeholder={t('promptPlaceholder')}
-                rows={5}
-                disabled={disabled}
-              />
-            </div>
-
-            <div className="flex items-center justify-between gap-4 rounded-md border border-border p-3">
-              <div>
-                <p className="text-sm font-medium text-foreground">
-                  {t('enableAssistant')}
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  {t('enableAssistantDesc')}
-                </p>
+                  disabled={disabled || !autoReplyEnabled}
+                  className="w-20"
+                />
               </div>
-              <Switch
-                checked={isActive}
-                onCheckedChange={setIsActive}
-                disabled={disabled}
-              />
-            </div>
 
-            <div className="flex items-center justify-between gap-4 rounded-md border border-border p-3">
-              <div>
-                <p className="text-sm font-medium text-foreground">
-                  {t('autoReply')}
-                </p>
+              <div className="space-y-2">
+                <Label htmlFor="ai-handoff">{t('handoffTo')}</Label>
                 <p className="text-xs text-muted-foreground">
-                  {t('autoReplyDesc')}
+                  {t('handoffToDesc')}
                 </p>
-              </div>
-              <Switch
-                checked={autoReplyEnabled}
-                onCheckedChange={setAutoReplyEnabled}
-                disabled={disabled || !isActive}
-              />
-            </div>
-
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <Label htmlFor="ai-max">{t('maxAutoReplies')}</Label>
-                <p className="text-xs text-muted-foreground">
-                  {t('maxAutoRepliesDesc')}
-                </p>
-              </div>
-              <Input
-                id="ai-max"
-                type="number"
-                min={1}
-                max={20}
-                value={maxPerConversation}
-                onChange={(e) =>
-                  setMaxPerConversation(
-                    Math.min(20, Math.max(1, Number(e.target.value) || 1)),
-                  )
-                }
-                disabled={disabled || !autoReplyEnabled}
-                className="w-20"
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="ai-handoff">{t('handoffTo')}</Label>
-              <p className="text-xs text-muted-foreground">
-                {t('handoffToDesc')}
-              </p>
-              <Select
-                value={handoffAgentId || HANDOFF_QUEUE}
-                onValueChange={(v) =>
-                  setHandoffAgentId(!v || v === HANDOFF_QUEUE ? '' : v)
-                }
-                disabled={disabled || !autoReplyEnabled}
-              >
-                <SelectTrigger id="ai-handoff">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={HANDOFF_QUEUE}>
-                    {t('handoffQueue')}
-                  </SelectItem>
-                  {members.map((m) => (
-                    <SelectItem key={m.user_id} value={m.user_id}>
-                      {memberLabel(m)}
+                <Select
+                  value={handoffAgentId || HANDOFF_QUEUE}
+                  onValueChange={(v) =>
+                    setHandoffAgentId(!v || v === HANDOFF_QUEUE ? '' : v)
+                  }
+                  disabled={disabled || !autoReplyEnabled}
+                >
+                  <SelectTrigger id="ai-handoff">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={HANDOFF_QUEUE}>
+                      {t('handoffQueue')}
                     </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          </CardContent>
-        </Card>
+                    {members.map((m) => (
+                      <SelectItem key={m.user_id} value={m.user_id}>
+                        {memberLabel(m)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
 
-        <AiKnowledgeCard
-          accountId={accountId}
-          canEdit={canEdit}
-          hasEmbeddingsKey={
-            embeddingsKeyEdited
-              ? embeddingsKey.trim().length > 0
-              : hasStoredEmbeddingsKey
-          }
-        />
-
-        <div className="flex items-center justify-between">
-          {configured ? (
-            <Button
-              variant="ghost"
-              onClick={handleRemove}
-              disabled={!canEdit || removing}
-              className="text-destructive hover:text-destructive"
-            >
-              {removing ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              ) : (
-                <Trash2 className="mr-2 h-4 w-4" />
-              )}
-              {t('remove')}
-            </Button>
-          ) : (
-            <span />
-          )}
-
-          <Button onClick={handleSave} disabled={disabled}>
-            {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-            {t('save')}
+      {/* Bottom Action Bar */}
+      <div className="flex items-center justify-between pt-4 border-t border-border">
+        {configured ? (
+          <Button
+            variant="ghost"
+            onClick={handleRemove}
+            disabled={!canEdit || removing}
+            className="text-destructive hover:text-destructive"
+          >
+            {removing ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : (
+              <Trash2 className="mr-2 h-4 w-4" />
+            )}
+            {t('remove')}
           </Button>
-        </div>
+        ) : (
+          <span />
+        )}
+
+        <Button onClick={handleSave} disabled={disabled}>
+          {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+          Save Configuration
+        </Button>
       </div>
     </div>
   );

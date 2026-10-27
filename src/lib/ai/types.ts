@@ -8,6 +8,140 @@
 
 export type AiProvider = 'openai' | 'anthropic' | 'openai_compatible'
 
+export interface ServiceItem {
+  id: string
+  name: string
+  description: string
+  benefits: string[]
+  keywords?: string[]
+}
+
+export interface PricingPackage {
+  id: string
+  name: string
+  price: string
+  billingPeriod?: string
+  description?: string
+  features?: string[]
+  serviceId?: string
+}
+
+export interface PricingRule {
+  id: string
+  title: string
+  condition?: string
+  rule: string
+}
+
+export interface FaqItem {
+  question: string
+  answer: string
+}
+
+export interface AiBusinessProfile {
+  businessName: string
+  businessDescription: string
+  industry: string
+  targetCustomers: string
+  services: ServiceItem[]
+  pricingPackages: PricingPackage[]
+  pricingRules: PricingRule[]
+  faqs: FaqItem[]
+  tone: 'professional' | 'consultative' | 'friendly' | 'casual' | 'formal'
+  personality?: string
+  preferredLanguage: string
+  responseLength: 'concise' | 'detailed' | 'balanced'
+  primaryConversionGoal: 'schedule_consultation' | 'explore_pricing' | 'lead_qualification' | 'direct_booking'
+  meetingRules?: {
+    durationMinutes?: number
+    defaultMeetingLink?: string
+    noticeHours?: number
+    allowReschedule?: boolean
+  }
+  handoffPreferences?: {
+    escalationContact?: string
+    notifyChannel?: string
+    autoHandoffOnFrustration?: boolean
+  }
+  customInstructions?: string
+  prohibitedClaims?: string[]
+}
+
+export type FlowPresetType =
+  | 'service_to_conversion'
+  | 'lead_qualification'
+  | 'pricing_inquiry'
+  | 'appointment_booking'
+  | 'support_faq'
+  | 'human_handoff'
+  | 'custom'
+
+export interface AiConversationFlowConfig {
+  preset: FlowPresetType
+  maxDiscoveryQuestions: number
+  requireDiscoveryBeforePricing: boolean
+  offerConsultationAfterPricing: boolean
+  acknowledgementStyle: 'compliment_and_benefit' | 'direct_benefit' | 'concise'
+  twoOptionChoice: boolean
+  customSteps?: Array<{
+    id: string
+    name: string
+    objective: string
+    promptGuidance?: string
+  }>
+}
+
+export interface AiMessageTemplates {
+  welcome?: string
+  service_acknowledgement?: string
+  service_benefits?: string
+  pricing_response?: string
+  pricing_clarification?: string
+  consultation_invitation?: string
+  booking_detail_collection?: string
+  booking_confirmation?: string
+  follow_up?: string
+  human_handoff?: string
+  fallback?: string
+}
+
+export type FlowStage =
+  | 'STAGE_A_UNDERSTAND'
+  | 'STAGE_B_ACKNOWLEDGE_SERVICE'
+  | 'STAGE_C_PRICING'
+  | 'STAGE_D_CONSULTATION'
+  | 'STAGE_E_COMPLETED'
+  | 'SLOT_SELECTION'
+  | 'CONFIRM_BOOK'
+  | 'MEETING_BOOKED'
+  | 'MEETING_CANCELLED'
+  | 'HUMAN_HANDOFF'
+  | 'OPT_OUT'
+
+export interface DeterministicFlowState {
+  currentFlow: FlowPresetType
+  currentStage: FlowStage
+  servicesIdentified: string[]
+  selectedService: string | null
+  selectedServiceName?: string | null
+  informationCollected: Record<string, string>
+  lastQuestionAsked: string | null
+  optionsOffered: string[]
+  selectedOption: string | null
+  discoveryQuestionsAsked: number
+  pricingRequested: boolean
+  consultationRequested: boolean
+  benefitsExplained: boolean
+  pricingDiscussed: boolean
+  pendingBooking: {
+    preferredDate?: string | null
+    preferredTime?: string | null
+    selectedSlot?: string | null
+    timezone?: string
+  }
+  status: 'in_progress' | 'completed' | 'paused' | 'handed_off'
+}
+
 /**
  * Account AI setup, decrypted and ready to use. Produced by
  * `loadAiConfig` — `apiKey` is the plaintext BYO provider key
@@ -31,6 +165,12 @@ export interface AiConfig {
    *  knowledge base is embedded and semantic retrieval turns on; when
    *  null, retrieval falls back to lexical full-text search. */
   embeddingsApiKey: string | null
+  /** Tenant-specific business profile & catalog */
+  businessProfile?: AiBusinessProfile | null
+  /** Tenant-specific conversation flow configuration */
+  conversationFlow?: AiConversationFlowConfig | null
+  /** Tenant-specific message templates */
+  messageTemplates?: AiMessageTemplates | null
 }
 
 /** A single conversation turn in the shape both providers accept. */

@@ -1,0 +1,884 @@
+import type { SupabaseClient } from '@supabase/supabase-js'
+import type {
+  AiConfig,
+  AiBusinessProfile,
+  AiConversationFlowConfig,
+  AiMessageTemplates,
+  ChatMessage,
+  DeterministicFlowState,
+  FlowStage,
+  ServiceItem,
+  PricingPackage,
+} from './types'
+import {
+  DEFAULT_AI_BUSINESS_PROFILE,
+  OPSIYS_DEFAULT_BUSINESS_PROFILE,
+  DEFAULT_AI_CONVERSATION_FLOW,
+  DEFAULT_AI_MESSAGE_TEMPLATES,
+  HANDOFF_SENTINEL,
+} from './defaults'
+import { renderTemplate, getEffectiveTemplate } from './templates'
+import {
+  parseNaturalDateTime,
+  isAffirmativeResponse,
+  isNegativeResponse,
+} from '@/lib/scheduling/nlp-datetime'
+import {
+  getAvailableSlots,
+  isSlotAvailable,
+  formatSlotsForWhatsApp,
+  loadSchedulingSettings,
+} from '@/lib/scheduling/availability'
+import { bookMeeting, cancelMeeting } from '@/lib/scheduling/booking'
+import { generateReply } from './generate'
+
+export interface FlowManagerArgs {
+  db: SupabaseClient
+  accountId: string
+  conversationId: string
+  contactId: string
+  messages: ChatMessage[]
+  config: AiConfig
+  contactName?: string | null
+  contactPhone?: string | null
+}
+
+export interface FlowManagerResult {
+  text: string
+  handoff: boolean
+  state: DeterministicFlowState
+  bookedMeetingId?: string
+  leadSummary?: string
+}
+
+// Regex patterns for intent detection
+export const OPT_OUT_REGEX =
+  /\b(stop|unsubscribe|opt[\s-]?out|cancel\s+subscription|remove\s+me|don'?t\s+message\s+me)\b/i
+
+export const HUMAN_REQUEST_REGEX =
+  /\b(human|agent|person|representative|support|talk to someone|speak (to|with) someone|speak to a person|operator)\b/i
+
+export const PRICING_INTENT_REGEX =
+  /\b(pricing|price|prices|cost|costs|rate|rates|package|packages|how much|fee|fees|quote|quotation|explore pricing|option 1|^1$)\b/i
+
+export const CONSULTATION_INTENT_REGEX =
+  /\b(consultation|meeting|call|demo|schedule|book|calendar|appointment|discuss|talk to team|book a consultation|option 2|^2$)\b/i
+
+/**
+ * Resolve effective business profile for a tenant.
+ */
+export function resolveEffectiveBusinessProfile(
+  config: AiConfig,
+  accountId: string,
+): AiBusinessProfile {
+  if (config.businessProfile && config.businessProfile.businessName) {
+    return config.businessProfile
+  }
+  const opsiysId = process.env.OPSIYS_ACCOUNT_ID?.trim()
+  if (opsiysId && accountId === opsiysId) {
+    return OPSIYS_DEFAULT_BUSINESS_PROFILE
+  }
+  return DEFAULT_AI_BUSINESS_PROFILE
+}
+
+/**
+ * Resolve effective conversation flow config for a tenant.
+ */
+export function resolveEffectiveFlowConfig(
+  config: AiConfig,
+): AiConversationFlowConfig {
+  if (config.conversationFlow && config.conversationFlow.preset) {
+    return {
+      ...DEFAULT_AI_CONVERSATION_FLOW,
+      ...config.conversationFlow,
+    }
+  }
+  return DEFAULT_AI_CONVERSATION_FLOW
+}
+
+/**
+ * Find matching service from tenant catalog based on user input.
+ */
+export function matchServiceFromCatalog(
+  text: string,
+  services: ServiceItem[],
+): ServiceItem | null {
+  if (!text || services.length === 0) return null
+  const lower = text.toLowerCase()
+
+  // 1. Direct name match
+  for (const s of services) {
+    if (lower.includes(s.name.toLowerCase())) {
+      return s
+    }
+  }
+
+  // 2. Keyword match
+  for (const s of services) {
+    if (s.keywords && s.keywords.length > 0) {
+      for (const kw of s.keywords) {
+        if (lower.includes(kw.toLowerCase())) {
+          return s
+        }
+      }
+    }
+  }
+
+  // 3. Common industry pattern match
+  for (const s of services) {
+    const sLower = s.name.toLowerCase()
+    if (
+      (lower.includes('email') && sLower.includes('email')) ||
+      (lower.includes('whatsapp') && sLower.includes('whatsapp')) ||
+      (lower.includes('lead') && sLower.includes('lead')) ||
+      (lower.includes('bot') && (sLower.includes('bot') || sLower.includes('agent'))) ||
+      (lower.includes('website') && (sLower.includes('web') || sLower.includes('site'))) ||
+      (lower.includes('crm') && sLower.includes('crm'))
+    ) {
+      return s
+    }
+  }
+
+  return null
+}
+
+/**
+ * Format verified pricing packages for WhatsApp display.
+ */
+export function formatPricingPackages(
+  packages: PricingPackage[],
+  selectedServiceId?: string | null,
+): string {
+  if (!packages || packages.length === 0) {
+    return 'Pricing is customized based on your specific scope and requirements.'
+  }
+
+  // Filter packages for selected service if applicable
+  const relevant = selectedServiceId
+    ? packages.filter((p) => !p.serviceId || p.serviceId === selectedServiceId)
+    : packages
+
+  const pkgs = relevant.length > 0 ? relevant : packages
+
+  return pkgs
+    .map((p) => {
+      const period = p.billingPeriod ? ` (${p.billingPeriod})` : ''
+      const desc = p.description ? `\n  ${p.description}` : ''
+      return `• *${p.name}*: ${p.price}${period}${desc}`
+    })
+    .join('\n\n')
+}
+
+/**
+ * Core Multi-Tenant Deterministic Conversation Flow Manager.
+ */
+export async function processConversationFlow(
+  args: FlowManagerArgs,
+): Promise<FlowManagerResult> {
+  const { db, accountId, conversationId, contactId, messages, config, contactName } = args
+
+  const profile = resolveEffectiveBusinessProfile(config, accountId)
+  const flowConfig = resolveEffectiveFlowConfig(config)
+  const templates = config.messageTemplates || DEFAULT_AI_MESSAGE_TEMPLATES
+
+  // 1. Load or initialize qualification / flow state
+  const qualificationRecord = await loadOrCreateQualification(
+    db,
+    accountId,
+    contactId,
+    conversationId,
+  )
+
+  const settings = await loadSchedulingSettings(db, accountId)
+  const tz = settings.timezone || 'Asia/Kolkata'
+
+  // Deserialize deterministic state
+  const state: DeterministicFlowState = deserializeFlowState(
+    qualificationRecord,
+    flowConfig.preset,
+  )
+
+  const lastUserTurn = [...messages].reverse().find((m) => m.role === 'user')
+  const userText = (lastUserTurn?.content || '').trim()
+  const lowerUserText = userText.toLowerCase()
+  const now = new Date()
+
+  // 2. Immediate Intent Gate: Opt-Out (STOP, UNSUBSCRIBE, etc.)
+  if (OPT_OUT_REGEX.test(lowerUserText)) {
+    state.currentStage = 'OPT_OUT'
+    state.status = 'paused'
+
+    await db
+      .from('conversations')
+      .update({
+        ai_autoreply_disabled: true,
+        ai_handoff_summary: 'Customer opted out of automated messaging.',
+      })
+      .eq('id', conversationId)
+
+    await persistFlowState(db, qualificationRecord.id, state, 'HUMAN_HANDOFF')
+
+    const reply =
+      'You have been unsubscribed and our automated messages have been paused. You will not receive further automated messages from us. If you ever wish to reconnect with us, simply message us anytime. Have a great day!'
+
+    return {
+      text: reply,
+      handoff: true,
+      state,
+      leadSummary: buildLeadSummary(state, profile),
+    }
+  }
+
+  // 3. Immediate Intent Gate: Human Handoff Request
+  if (HUMAN_REQUEST_REGEX.test(lowerUserText)) {
+    state.currentStage = 'HUMAN_HANDOFF'
+    state.status = 'handed_off'
+
+    await persistFlowState(db, qualificationRecord.id, state, 'HUMAN_HANDOFF')
+
+    const handoffText = renderTemplate(
+      getEffectiveTemplate(templates, 'human_handoff'),
+      {
+        business_name: profile.businessName,
+        customer_name: contactName || 'there',
+      },
+    )
+
+    return {
+      text: `${handoffText}\n\n${HANDOFF_SENTINEL}`,
+      handoff: true,
+      state,
+      leadSummary: buildLeadSummary(state, profile),
+    }
+  }
+
+  // 4. Parse dates, times, and meeting intent
+  const nlpResult = parseNaturalDateTime(userText, now, tz)
+
+  // Handle meeting cancellation
+  if (nlpResult.isCancellation && (state.currentStage === 'MEETING_BOOKED' || qualificationRecord.meeting_id)) {
+    if (qualificationRecord.meeting_id) {
+      await cancelMeeting(db, {
+        meetingId: qualificationRecord.meeting_id,
+        accountId,
+        reason: 'Cancelled by customer via WhatsApp',
+      })
+    }
+    state.currentStage = 'MEETING_CANCELLED'
+    await persistFlowState(db, qualificationRecord.id, state, 'MEETING_CANCELLED')
+
+    return {
+      text: `No problem at all! I have cancelled your scheduled meeting with ${profile.businessName}. Whenever you would like to reconnect, simply message us here. Have a great day!`,
+      handoff: false,
+      state,
+      leadSummary: buildLeadSummary(state, profile),
+    }
+  }
+
+  // Handle meeting reschedule
+  if (nlpResult.isReschedule && qualificationRecord.meeting_id) {
+    const slots = await getAvailableSlots(db, accountId, { limit: 3 })
+    const formattedSlots = formatSlotsForWhatsApp(slots)
+    state.currentStage = 'SLOT_SELECTION'
+
+    await persistFlowState(db, qualificationRecord.id, state, 'SLOT_SELECTION', slots)
+
+    return {
+      text: `I'd be happy to reschedule! Here are the next available slots:\n\n${formattedSlots}\n\nWhich slot works best for you? (You can also propose another date and time).`,
+      handoff: false,
+      state,
+      leadSummary: buildLeadSummary(state, profile),
+    }
+  }
+
+  // 5. Active Scheduling Sub-flow (SLOT_SELECTION or CONFIRM_BOOK)
+  const isSchedulingStage =
+    state.currentStage === 'SLOT_SELECTION' ||
+    state.currentStage === 'CONFIRM_BOOK' ||
+    (nlpResult.selectedOptionIndex !== undefined &&
+      qualificationRecord.proposed_slots &&
+      qualificationRecord.proposed_slots.length > 0)
+
+  if (isSchedulingStage) {
+    // 5A. Prospect chose one of proposed numbered slots (e.g. "1", "2")
+    if (
+      nlpResult.selectedOptionIndex !== undefined &&
+      qualificationRecord.proposed_slots &&
+      qualificationRecord.proposed_slots[nlpResult.selectedOptionIndex]
+    ) {
+      const chosenSlot = qualificationRecord.proposed_slots[nlpResult.selectedOptionIndex]
+      const isFree = await isSlotAvailable(db, accountId, chosenSlot.startTime, chosenSlot.endTime)
+
+      if (isFree) {
+        return await executeCalendarBooking({
+          db,
+          accountId,
+          contactId,
+          conversationId,
+          qualificationId: qualificationRecord.id,
+          state,
+          chosenSlot,
+          profile,
+          templates,
+          contactName,
+        })
+      } else {
+        const altSlots = await getAvailableSlots(db, accountId, { limit: 3 })
+        const formatted = formatSlotsForWhatsApp(altSlots)
+        await persistFlowState(db, qualificationRecord.id, state, 'SLOT_SELECTION', altSlots)
+        return {
+          text: `That slot was just booked! Here are other open slots:\n\n${formatted}\n\nWhich one works for you?`,
+          handoff: false,
+          state,
+          leadSummary: buildLeadSummary(state, profile),
+        }
+      }
+    }
+
+    // 5B. Prospect confirmed offered slot in CONFIRM_BOOK
+    if (
+      state.currentStage === 'CONFIRM_BOOK' &&
+      (nlpResult.isAffirmative || isAffirmativeResponse(userText)) &&
+      state.pendingBooking.selectedSlot
+    ) {
+      const slotStart = new Date(state.pendingBooking.selectedSlot)
+      const slotEnd = new Date(slotStart.getTime() + (settings.meeting_duration_minutes || 15) * 60 * 1000)
+      const chosenSlot = {
+        startTime: slotStart.toISOString(),
+        endTime: slotEnd.toISOString(),
+        formattedDate: slotStart.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: tz }),
+        formattedTime: slotStart.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: tz }),
+        timezone: tz,
+      }
+
+      const isFree = await isSlotAvailable(db, accountId, chosenSlot.startTime, chosenSlot.endTime)
+      if (isFree) {
+        return await executeCalendarBooking({
+          db,
+          accountId,
+          contactId,
+          conversationId,
+          qualificationId: qualificationRecord.id,
+          state,
+          chosenSlot,
+          profile,
+          templates,
+          contactName,
+        })
+      }
+    }
+
+    // 5C. Prospect specified both Date and Time
+    if (nlpResult.hasExplicitDate && nlpResult.hasExplicitTime && nlpResult.date) {
+      const start = nlpResult.date
+      const end = new Date(start.getTime() + (settings.meeting_duration_minutes || 15) * 60 * 1000)
+      const candidateSlot = {
+        startTime: start.toISOString(),
+        endTime: end.toISOString(),
+        formattedDate: start.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: tz }),
+        formattedTime: start.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: tz }),
+        timezone: tz,
+      }
+
+      const isFree = await isSlotAvailable(db, accountId, candidateSlot.startTime, candidateSlot.endTime)
+      if (isFree) {
+        state.currentStage = 'CONFIRM_BOOK'
+        state.pendingBooking.selectedSlot = candidateSlot.startTime
+        state.pendingBooking.preferredDate = nlpResult.dateStr || null
+        state.pendingBooking.preferredTime = nlpResult.timeStr || null
+
+        await persistFlowState(db, qualificationRecord.id, state, 'SLOT_SELECTION', [candidateSlot])
+
+        return {
+          text: `Good news! ${candidateSlot.formattedDate} at ${candidateSlot.formattedTime} (${tz}) is available for a ${settings.meeting_duration_minutes || 15}-minute consultation. 🙌\n\nShall I go ahead and book that for you?`,
+          handoff: false,
+          state,
+          leadSummary: buildLeadSummary(state, profile),
+        }
+      } else {
+        const altSlots = await getAvailableSlots(db, accountId, { limit: 3 })
+        const formatted = formatSlotsForWhatsApp(altSlots)
+        await persistFlowState(db, qualificationRecord.id, state, 'SLOT_SELECTION', altSlots)
+
+        return {
+          text: `That particular time is already booked. Here are the closest available slots:\n\n${formatted}\n\nWhich slot works best for you?`,
+          handoff: false,
+          state,
+          leadSummary: buildLeadSummary(state, profile),
+        }
+      }
+    }
+
+    // 5D. Prospect declined slot in scheduling
+    if (nlpResult.isNegative || isNegativeResponse(userText)) {
+      state.currentStage = 'STAGE_B_ACKNOWLEDGE_SERVICE'
+      await persistFlowState(db, qualificationRecord.id, state, 'LEAD_QUALIFIED')
+      return {
+        text: `No worries at all! Would you prefer to explore our pricing options instead, or suggest another day that suits you better?`,
+        handoff: false,
+        state,
+        leadSummary: buildLeadSummary(state, profile),
+      }
+    }
+  }
+
+  // 6. Service Identification & Catalog Matching
+  const matchedService = matchServiceFromCatalog(userText, profile.services)
+  if (matchedService) {
+    if (!state.selectedService) {
+      state.selectedService = matchedService.id
+      state.selectedServiceName = matchedService.name
+      if (!state.servicesIdentified.includes(matchedService.name)) {
+        state.servicesIdentified.push(matchedService.name)
+      }
+    }
+  }
+
+  // 7. Intent Recognition: Pricing vs Consultation
+  const asksPricing = PRICING_INTENT_REGEX.test(userText)
+  const asksConsultation =
+    CONSULTATION_INTENT_REGEX.test(userText) ||
+    (state.optionsOffered.includes('2') && (lowerUserText === '2' || lowerUserText.includes('consultation')))
+
+  if (asksPricing) {
+    state.pricingRequested = true
+    state.selectedOption = '1. Explore pricing'
+  }
+
+  if (asksConsultation) {
+    state.consultationRequested = true
+    state.selectedOption = '2. Book a consultation'
+  }
+
+  // 8. Deterministic Flow State Transitions
+  // Rule: If customer has already requested consultation, move to Stage D immediately!
+  if (state.consultationRequested && !state.pendingBooking.selectedSlot && state.currentStage !== 'MEETING_BOOKED') {
+    state.currentStage = 'SLOT_SELECTION'
+    const slots = await getAvailableSlots(db, accountId, { limit: 3 })
+    const formattedSlots = formatSlotsForWhatsApp(slots)
+    await persistFlowState(db, qualificationRecord.id, state, 'SLOT_SELECTION', slots)
+
+    const detailPrompt = renderTemplate(
+      getEffectiveTemplate(templates, 'booking_detail_collection'),
+      {
+        business_name: profile.businessName,
+        customer_name: contactName || 'there',
+        service_name: state.selectedServiceName || 'our services',
+      },
+    )
+
+    const text = slots.length > 0
+      ? `We'd love to schedule a consultation with you! Here are our next available slots:\n\n${formattedSlots}\n\nWhich slot works best, or let us know a day/time that suits you!`
+      : detailPrompt
+
+    return {
+      text,
+      handoff: false,
+      state,
+      leadSummary: buildLeadSummary(state, profile),
+    }
+  }
+
+  // Rule: If customer has requested pricing, move to Stage C immediately!
+  if (state.pricingRequested && !state.pricingDiscussed) {
+    state.currentStage = 'STAGE_C_PRICING'
+    state.pricingDiscussed = true
+
+    const pricingInfo = formatPricingPackages(profile.pricingPackages, state.selectedService)
+    const pricingReply = renderTemplate(
+      getEffectiveTemplate(templates, 'pricing_response'),
+      {
+        business_name: profile.businessName,
+        customer_name: contactName || 'there',
+        service_name: state.selectedServiceName || 'our solutions',
+        pricing_info: pricingInfo,
+      },
+    )
+
+    await persistFlowState(db, qualificationRecord.id, state, 'LEAD_QUALIFIED')
+
+    return {
+      text: pricingReply,
+      handoff: false,
+      state,
+      leadSummary: buildLeadSummary(state, profile),
+    }
+  }
+
+  // Rule: If customer just identified a service (or service is selected and benefits not yet explained):
+  // STAGE B: Acknowledge Selected Service + Compliment + Grounded Benefit + EXACTLY 2 OPTIONS (Explore pricing / Book consultation)
+  if (state.selectedService && !state.benefitsExplained && state.currentStage !== 'MEETING_BOOKED') {
+    state.currentStage = 'STAGE_B_ACKNOWLEDGE_SERVICE'
+    state.benefitsExplained = true
+    state.optionsOffered = ['1. Explore pricing', '2. Book a consultation']
+
+    const serviceObj = profile.services.find((s) => s.id === state.selectedService)
+    const benefitText =
+      serviceObj && serviceObj.benefits && serviceObj.benefits.length > 0
+        ? serviceObj.benefits.join(' and ')
+        : 'save time, streamline your processes, and achieve consistent results'
+
+    const reply = renderTemplate(
+      getEffectiveTemplate(templates, 'service_acknowledgement'),
+      {
+        business_name: profile.businessName,
+        customer_name: contactName || 'there',
+        service_name: state.selectedServiceName || 'Automation',
+        service_benefits: benefitText,
+      },
+    )
+
+    await persistFlowState(db, qualificationRecord.id, state, 'REQUIREMENT_DISCOVERY')
+
+    return {
+      text: reply,
+      handoff: false,
+      state,
+      leadSummary: buildLeadSummary(state, profile),
+    }
+  }
+
+  // 9. Natural Language Discovery within Stage A (Understand Customer)
+  // Limit discovery questions to maxDiscoveryQuestions (default 2)
+  if (state.discoveryQuestionsAsked >= (flowConfig.maxDiscoveryQuestions || 2)) {
+    // Discovery limit reached — present services menu instead of asking another open discovery question!
+    const serviceList = profile.services.map((s, i) => `${i + 1}. ${s.name}`).join('\n')
+    const text = `Thanks for sharing those details! We can certainly help. Which of our core services would make the biggest difference for you right now?\n\n${serviceList}\n\nOr let me know if you would like to explore pricing or schedule a call!`
+
+    state.currentStage = 'STAGE_A_UNDERSTAND'
+    await persistFlowState(db, qualificationRecord.id, state, 'REQUIREMENT_DISCOVERY')
+
+    return {
+      text,
+      handoff: false,
+      state,
+      leadSummary: buildLeadSummary(state, profile),
+    }
+  }
+
+  // Ask focused discovery question via LLM within Stage A boundaries
+  const systemPrompt = buildFlowSystemPrompt({
+    profile,
+    flowConfig,
+    state,
+    contactName,
+    basePrompt: config.systemPrompt,
+  })
+
+  const gen = await generateReply({
+    config,
+    systemPrompt,
+    messages,
+  })
+  const generatedText = gen.text
+  let genHandoff = gen.handoff
+
+  if (generatedText.includes(HANDOFF_SENTINEL)) {
+    genHandoff = true
+  }
+
+  state.discoveryQuestionsAsked += 1
+  state.lastQuestionAsked = generatedText
+
+  await persistFlowState(db, qualificationRecord.id, state, 'REQUIREMENT_DISCOVERY')
+
+  return {
+    text: generatedText.replace(HANDOFF_SENTINEL, '').trim(),
+    handoff: genHandoff,
+    state,
+    leadSummary: buildLeadSummary(state, profile),
+  }
+}
+
+/**
+ * Execute real calendar booking and verify persistence.
+ */
+async function executeCalendarBooking(args: {
+  db: SupabaseClient
+  accountId: string
+  contactId: string
+  conversationId: string
+  qualificationId: string
+  state: DeterministicFlowState
+  chosenSlot: {
+    startTime: string
+    endTime: string
+    formattedDate: string
+    formattedTime: string
+    timezone: string
+  }
+  profile: AiBusinessProfile
+  templates: AiMessageTemplates
+  contactName?: string | null
+}): Promise<FlowManagerResult> {
+  const {
+    db,
+    accountId,
+    contactId,
+    conversationId,
+    qualificationId,
+    state,
+    chosenSlot,
+    profile,
+    templates,
+    contactName,
+  } = args
+
+  const idempotencyKey = `flow_bcast_${conversationId}_${new Date(chosenSlot.startTime).getTime()}`
+  const leadSummaryText = buildLeadSummary(state, profile)
+
+  const bookingRes = await bookMeeting(db, {
+    accountId,
+    contactId,
+    conversationId,
+    title: `${profile.businessName} Consultation: ${contactName || 'Lead'} (${state.selectedServiceName || 'Services'})`,
+    description: `Customer: ${contactName || 'WhatsApp Lead'}\nService: ${state.selectedServiceName || 'General'}\nSummary: ${leadSummaryText}`,
+    serviceRequested: state.selectedServiceName || 'Consultation',
+    startTime: chosenSlot.startTime,
+    endTime: chosenSlot.endTime,
+    timezone: chosenSlot.timezone,
+    bookingSource: 'whatsapp_ai',
+    leadSummary: leadSummaryText,
+    idempotencyKey,
+  })
+
+  if (bookingRes.success && bookingRes.meeting_id) {
+    state.currentStage = 'MEETING_BOOKED'
+    state.status = 'completed'
+    state.pendingBooking.selectedSlot = chosenSlot.startTime
+
+    await persistFlowState(db, qualificationId, state, 'MEETING_BOOKED', undefined, bookingRes.meeting_id)
+
+    const confirmationText = renderTemplate(
+      getEffectiveTemplate(templates, 'booking_confirmation'),
+      {
+        business_name: profile.businessName,
+        customer_name: contactName || 'there',
+        service_name: state.selectedServiceName || 'our services',
+        meeting_date: chosenSlot.formattedDate,
+        meeting_time: chosenSlot.formattedTime,
+        meeting_link: bookingRes.meeting_link || profile.meetingRules?.defaultMeetingLink || 'will be sent prior to the call',
+      },
+    )
+
+    return {
+      text: confirmationText,
+      handoff: false,
+      state,
+      bookedMeetingId: bookingRes.meeting_id,
+      leadSummary: leadSummaryText,
+    }
+  }
+
+  // Booking failed or slot raced away
+  const altSlots = await getAvailableSlots(db, accountId, { limit: 3 })
+  const formatted = formatSlotsForWhatsApp(altSlots)
+  state.currentStage = 'SLOT_SELECTION'
+
+  await persistFlowState(db, qualificationId, state, 'SLOT_SELECTION', altSlots)
+
+  return {
+    text: `I was unable to secure that exact slot. Here are the closest available slots with our team:\n\n${formatted}\n\nWhich slot works for you?`,
+    handoff: false,
+    state,
+    leadSummary: leadSummaryText,
+  }
+}
+
+/**
+ * Persist deterministic state with backward-compatible fallback to qualification_notes.
+ */
+async function persistFlowState(
+  db: SupabaseClient,
+  qualificationId: string,
+  state: DeterministicFlowState,
+  dbState: string,
+  proposedSlots?: any[],
+  meetingId?: string,
+): Promise<void> {
+  const summary = `${state.selectedServiceName ? `Service: ${state.selectedServiceName} | ` : ''}Stage: ${state.currentStage}`
+  const notes = `${summary}\n---\n${JSON.stringify(state)}`
+
+  const payload: Record<string, any> = {
+    state: dbState,
+    requested_service: state.selectedServiceName || null,
+    qualification_notes: notes,
+    flow_state: state,
+    last_interaction_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  }
+
+  if (proposedSlots) {
+    payload.proposed_slots = proposedSlots
+  }
+  if (meetingId) {
+    payload.meeting_id = meetingId
+  }
+  if (state.pendingBooking.selectedSlot) {
+    payload.selected_slot = state.pendingBooking.selectedSlot
+  }
+
+  // Attempt update with flow_state column
+  const { error } = await db
+    .from('ai_lead_qualifications')
+    .update(payload)
+    .eq('id', qualificationId)
+
+  // If column flow_state doesn't exist yet on DB, retry without it (backward compatibility)
+  if (error && (error.code === '42703' || error.message?.includes('flow_state'))) {
+    delete payload.flow_state
+    await db
+      .from('ai_lead_qualifications')
+      .update(payload)
+      .eq('id', qualificationId)
+  }
+}
+
+/**
+ * Load or create an ai_lead_qualifications row.
+ */
+async function loadOrCreateQualification(
+  db: SupabaseClient,
+  accountId: string,
+  contactId: string,
+  conversationId: string,
+): Promise<any> {
+  const { data } = await db
+    .from('ai_lead_qualifications')
+    .select('*')
+    .eq('conversation_id', conversationId)
+    .maybeSingle()
+
+  if (data) return data
+
+  const { data: created, error } = await db
+    .from('ai_lead_qualifications')
+    .insert({
+      account_id: accountId,
+      contact_id: contactId,
+      conversation_id: conversationId,
+      state: 'NEW_LEAD',
+    })
+    .select()
+    .single()
+
+  if (error || !created) {
+    return {
+      id: 'temp-' + conversationId,
+      account_id: accountId,
+      contact_id: contactId,
+      conversation_id: conversationId,
+      state: 'NEW_LEAD',
+      qualification_notes: null,
+      proposed_slots: [],
+    }
+  }
+
+  return created
+}
+
+/**
+ * Deserialize deterministic flow state from database row.
+ */
+export function deserializeFlowState(
+  row: any,
+  defaultPreset: any = 'service_to_conversion',
+): DeterministicFlowState {
+  if (row.flow_state && typeof row.flow_state === 'object' && row.flow_state.currentStage) {
+    return row.flow_state as DeterministicFlowState
+  }
+
+  // Fallback to parsing from qualification_notes
+  if (row.qualification_notes && row.qualification_notes.includes('---')) {
+    try {
+      const jsonPart = row.qualification_notes.substring(row.qualification_notes.indexOf('---') + 3).trim()
+      const parsed = JSON.parse(jsonPart)
+      if (parsed.currentStage) {
+        return parsed as DeterministicFlowState
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return {
+    currentFlow: defaultPreset,
+    currentStage: 'STAGE_A_UNDERSTAND',
+    servicesIdentified: row.requested_service ? [row.requested_service] : [],
+    selectedService: null,
+    selectedServiceName: row.requested_service || null,
+    informationCollected: {},
+    lastQuestionAsked: null,
+    optionsOffered: [],
+    selectedOption: null,
+    discoveryQuestionsAsked: 0,
+    pricingRequested: false,
+    consultationRequested: false,
+    benefitsExplained: false,
+    pricingDiscussed: false,
+    pendingBooking: {},
+    status: 'in_progress',
+  }
+}
+
+/**
+ * Build concise summary of lead for human agent & CRM.
+ */
+export function buildLeadSummary(
+  state: DeterministicFlowState,
+  profile: AiBusinessProfile,
+): string {
+  const parts: string[] = []
+  parts.push(`Business: ${profile.businessName}`)
+  if (state.selectedServiceName) parts.push(`Service: ${state.selectedServiceName}`)
+  if (state.selectedOption) parts.push(`Choice: ${state.selectedOption}`)
+  parts.push(`Stage: ${state.currentStage}`)
+  return parts.join(' | ')
+}
+
+/**
+ * Build rich system prompt for Stage A discovery.
+ */
+function buildFlowSystemPrompt(args: {
+  profile: AiBusinessProfile
+  flowConfig: AiConversationFlowConfig
+  state: DeterministicFlowState
+  contactName?: string | null
+  basePrompt?: string | null
+}): string {
+  const { profile, flowConfig, state, contactName, basePrompt } = args
+
+  const parts = [
+    `You are the official conversational sales & solutions advisor for ${profile.businessName}.`,
+    `Business Description: ${profile.businessDescription}`,
+    `Industry: ${profile.industry} | Target Customers: ${profile.targetCustomers}`,
+    `Tone: ${profile.tone} | Language: ${profile.preferredLanguage} | Length: ${profile.responseLength}`,
+    `Prospect Name: ${contactName || 'Valued Prospect'}`,
+    `Current Stage: ${state.currentStage}`,
+    '',
+    '## CORE CONVERSATION QUALITY RULES (STRICT):',
+    '1. ONE QUESTION PER MESSAGE: Never ask more than one question in a single reply.',
+    '2. NEVER ASK FOR INFORMATION ALREADY PROVIDED: If the prospect already shared what they do, their challenge, or what service they want, do not ask them again!',
+    '3. ACKNOWLEDGE BEFORE ASKING: Genuinely acknowledge what they just said before asking your question.',
+    '4. DO NOT REPEAT QUESTIONS: Never repeat a question you already asked.',
+    '5. DO NOT INVENT PRICES OR BOOKINGS: Only discuss verified pricing packages or offer consultations. Never make up discounts or false availability.',
+    '6. CONCISE: WhatsApp messages must be short (2 to 4 sentences).',
+    '',
+    `## SERVICES OFFERED:`,
+    ...profile.services.map((s) => `- ${s.name}: ${s.description}`),
+  ]
+
+  if (profile.customInstructions) {
+    parts.push(`\n## CUSTOM INSTRUCTIONS:\n${profile.customInstructions}`)
+  }
+
+  if (profile.prohibitedClaims && profile.prohibitedClaims.length > 0) {
+    parts.push(`\n## PROHIBITED CLAIMS:\n${profile.prohibitedClaims.map((c) => `- ${c}`).join('\n')}`)
+  }
+
+  if (basePrompt && basePrompt.trim()) {
+    parts.push(`\n## ADDITIONAL DIRECTIVES:\n${basePrompt}`)
+  }
+
+  return parts.join('\n')
+}

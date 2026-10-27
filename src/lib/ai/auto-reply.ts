@@ -16,6 +16,7 @@ import { sendTypingIndicator } from '@/lib/whatsapp/meta-api'
 import { checkRateLimit, RATE_LIMITS } from '@/lib/rate-limit'
 import { checkAccountQuota, incrementAccountUsage } from '@/lib/billing/quota'
 import { processOpsiysLeadConversation } from './opsiys-agent'
+import { processConversationFlow } from './flow-manager'
 
 interface DispatchArgs {
   /** Tenancy key — drives config, contact, and whatsapp_config lookups. */
@@ -198,38 +199,27 @@ export async function dispatchInboundToAiReply(
     let handoff = false
     let usage: AiUsage | null = null
 
-    if (isOpsiysAccount(accountId)) {
-      try {
-        const opsiysResult = await processOpsiysLeadConversation({
-          db,
-          accountId,
-          conversationId,
-          contactId,
-          messages,
-          config: {
-            ...config,
-            systemPrompt,
-          },
-          contactName: contactRow?.name || null,
-          contactPhone: contactRow?.phone || null,
-        })
-        text = opsiysResult.text
-        handoff = opsiysResult.handoff
-      } catch (opsiysErr) {
-        console.warn('[ai auto-reply] OPSIYS agent fallback to standard generation:', opsiysErr)
-        const gen = await generateReply({
-          config,
+    try {
+      const flowResult = await processConversationFlow({
+        db,
+        accountId,
+        conversationId,
+        contactId,
+        messages,
+        config: {
+          ...config,
           systemPrompt,
-          messages,
-        })
-        text = gen.text
-        handoff = gen.handoff
-        usage = gen.usage
-      }
-    } else {
-      // Standard multi-tenant generation: Grounded exclusively in this tenant's
-      // custom business systemPrompt, verified knowledge-base excerpts, and BYO provider config.
-      // Never uses OPSIYS branding, services, or calendar booking.
+        },
+        contactName: contactRow?.name || null,
+        contactPhone: contactRow?.phone || null,
+      })
+      text = flowResult.text
+      handoff = flowResult.handoff
+    } catch (flowErr) {
+      console.warn(
+        '[ai auto-reply] Conversation flow manager error, falling back to standard generation:',
+        flowErr,
+      )
       const gen = await generateReply({
         config,
         systemPrompt,

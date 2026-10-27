@@ -13,6 +13,8 @@ import { normalizeOpenAiCompatibleBaseUrl } from '@/lib/ai/providers/openai-comp
 import { canReuseStoredAiKey } from '@/lib/ai/stored-key'
 import { getT } from '@/lib/i18n/translate'
 
+import { validateAllTemplates } from '@/lib/ai/templates'
+
 const t = getT('Api')
 
 function bad(message: string) {
@@ -30,15 +32,29 @@ export async function GET() {
   try {
     const { supabase, accountId } = await getCurrentAccount()
 
-    const { data, error } = await supabase
+    const cols =
+      'provider, model, base_url, system_prompt, is_active, auto_reply_enabled, auto_reply_max_per_conversation, handoff_agent_id, api_key, embeddings_api_key'
+
+    let data: any
+    let error: any
+    const primaryRes = await supabase
       .from('ai_configs')
-      // `api_key` is selected only to derive `has_key` — it is stripped
-      // out below and never returned to the client.
-      .select(
-        'provider, model, base_url, system_prompt, is_active, auto_reply_enabled, auto_reply_max_per_conversation, handoff_agent_id, api_key, embeddings_api_key',
-      )
+      .select(`${cols}, business_profile, conversation_flow, message_templates`)
       .eq('account_id', accountId)
       .maybeSingle()
+
+    if (primaryRes.error && (primaryRes.error.code === '42703' || primaryRes.error.message?.includes('column'))) {
+      const fallbackRes = await supabase
+        .from('ai_configs')
+        .select(cols)
+        .eq('account_id', accountId)
+        .maybeSingle()
+      data = fallbackRes.data
+      error = fallbackRes.error
+    } else {
+      data = primaryRes.data
+      error = primaryRes.error
+    }
 
     if (error) {
       console.error('[ai/config GET] fetch error:', error)
@@ -232,6 +248,22 @@ export async function POST(request: Request) {
       auto_reply_enabled: autoReplyEnabled,
       auto_reply_max_per_conversation: maxPer,
     }
+
+    if (body.message_templates && typeof body.message_templates === 'object') {
+      const tplValidation = validateAllTemplates(body.message_templates)
+      if (!tplValidation.valid) {
+        const firstErr = Object.values(tplValidation.errors)[0]
+        return bad(firstErr || 'Invalid message templates')
+      }
+      shared.message_templates = body.message_templates
+    }
+    if (body.business_profile && typeof body.business_profile === 'object') {
+      shared.business_profile = body.business_profile
+    }
+    if (body.conversation_flow && typeof body.conversation_flow === 'object') {
+      shared.conversation_flow = body.conversation_flow
+    }
+
     // Only touch the handoff target when the form actually sent the field,
     // so a partial save (e.g. flipping a toggle) doesn't wipe it.
     if (handoffProvided) shared.handoff_agent_id = handoffAgentId
@@ -242,10 +274,25 @@ export async function POST(request: Request) {
     }
 
     if (existing) {
-      const { error: upErr } = await supabase
+      const updatePayload: Record<string, unknown> = encryptedKey ? { ...shared, api_key: encryptedKey } : { ...shared }
+      let { error: upErr } = await supabase
         .from('ai_configs')
-        .update(encryptedKey ? { ...shared, api_key: encryptedKey } : shared)
+        .update(updatePayload)
         .eq('account_id', accountId)
+
+      // Fallback if migration 053 columns are not yet in schema cache
+      if (upErr && (upErr.code === '42703' || upErr.message?.includes('column'))) {
+        const cleanPayload = { ...updatePayload }
+        delete cleanPayload.business_profile
+        delete cleanPayload.conversation_flow
+        delete cleanPayload.message_templates
+        const retry = await supabase
+          .from('ai_configs')
+          .update(cleanPayload)
+          .eq('account_id', accountId)
+        upErr = retry.error
+      }
+
       if (upErr) {
         console.error('[ai/config POST] update error:', upErr)
         return NextResponse.json(
@@ -254,12 +301,24 @@ export async function POST(request: Request) {
         )
       }
     } else {
-      const { error: insErr } = await supabase.from('ai_configs').insert({
+      const insertPayload: Record<string, unknown> = {
         account_id: accountId,
         created_by: userId,
         api_key: encryptedKey, // guaranteed non-null: rawKey required when no existing row
         ...shared,
-      })
+      }
+      let { error: insErr } = await supabase.from('ai_configs').insert(insertPayload)
+
+      // Fallback if migration 053 columns are not yet in schema cache
+      if (insErr && (insErr.code === '42703' || insErr.message?.includes('column'))) {
+        const cleanPayload = { ...insertPayload }
+        delete cleanPayload.business_profile
+        delete cleanPayload.conversation_flow
+        delete cleanPayload.message_templates
+        const retry = await supabase.from('ai_configs').insert(cleanPayload)
+        insErr = retry.error
+      }
+
       if (insErr) {
         console.error('[ai/config POST] insert error:', insErr)
         return NextResponse.json(

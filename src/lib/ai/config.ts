@@ -13,33 +13,44 @@ interface AiConfigRow {
   auto_reply_max_per_conversation: number
   handoff_agent_id: string | null
   embeddings_api_key: string | null
+  business_profile?: any
+  conversation_flow?: any
+  message_templates?: any
 }
 
 const CONFIG_COLUMNS =
   'provider, model, base_url, api_key, system_prompt, is_active, auto_reply_enabled, auto_reply_max_per_conversation, handoff_agent_id, embeddings_api_key'
 
-/**
- * Load and decrypt the account's AI config for *use* (draft or
- * auto-reply). Returns `null` when there's no row or the master switch
- * (`is_active`) is off — both mean "AI is not available", which callers
- * treat identically. Throws only if the stored key can't be decrypted
- * (mismatched `ENCRYPTION_KEY`), so that distinct failure surfaces
- * rather than looking like "not configured".
- *
- * Works with any client: pass the RLS-scoped SSR client from a
- * dashboard route, or the service-role admin client from the webhook.
- */
 export async function loadAiConfig(
   db: SupabaseClient,
   accountId: string,
   opts: { requireActive?: boolean } = {},
 ): Promise<AiConfig | null> {
   const { requireActive = true } = opts
-  const { data, error } = await db
+
+  let data: any
+  let error: any
+
+  // Try selecting with extended business_profile and flow columns
+  const primaryRes = await db
     .from('ai_configs')
-    .select(CONFIG_COLUMNS)
+    .select(`${CONFIG_COLUMNS}, business_profile, conversation_flow, message_templates`)
     .eq('account_id', accountId)
     .maybeSingle()
+
+  if (primaryRes.error && (primaryRes.error.code === '42703' || primaryRes.error.message?.includes('column'))) {
+    // Backward-compatible fallback if migration 053 hasn't run yet
+    const fallbackRes = await db
+      .from('ai_configs')
+      .select(CONFIG_COLUMNS)
+      .eq('account_id', accountId)
+      .maybeSingle()
+    data = fallbackRes.data
+    error = fallbackRes.error
+  } else {
+    data = primaryRes.data
+    error = primaryRes.error
+  }
 
   if (error) throw error
   if (!data) return null
@@ -92,6 +103,9 @@ export async function loadAiConfig(
     autoReplyMaxPerConversation: row.auto_reply_max_per_conversation,
     handoffAgentId: row.handoff_agent_id,
     embeddingsApiKey,
+    businessProfile: row.business_profile ?? null,
+    conversationFlow: row.conversation_flow ?? null,
+    messageTemplates: row.message_templates ?? null,
   }
 }
 

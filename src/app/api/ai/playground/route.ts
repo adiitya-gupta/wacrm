@@ -4,6 +4,7 @@ import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from '@/lib/rate-limit
 import { loadAiConfig } from '@/lib/ai/config'
 import { retrieveKnowledge } from '@/lib/ai/knowledge'
 import { generateReply } from '@/lib/ai/generate'
+import { processConversationFlow } from '@/lib/ai/flow-manager'
 import { buildSystemPrompt } from '@/lib/ai/defaults'
 import { latestUserMessage } from '@/lib/ai/query'
 import { AiError, type ChatMessage } from '@/lib/ai/types'
@@ -87,8 +88,35 @@ export async function POST(request: Request) {
       knowledge,
     })
 
-    const { text, handoff } = await generateReply({ config, systemPrompt, messages })
-    return NextResponse.json({ reply: text, handoff })
+    let text = ''
+    let handoff = false
+    let currentStage = 'STAGE_A_UNDERSTAND'
+    let selectedService: string | null = null
+
+    try {
+      const flowResult = await processConversationFlow({
+        db: supabase,
+        accountId,
+        conversationId: 'sim-' + userId,
+        contactId: 'sim-contact',
+        messages,
+        config: {
+          ...config,
+          systemPrompt,
+        },
+        contactName: 'Playground Tester',
+      })
+      text = flowResult.text
+      handoff = flowResult.handoff
+      currentStage = flowResult.state.currentStage
+      selectedService = flowResult.state.selectedServiceName || null
+    } catch {
+      const gen = await generateReply({ config, systemPrompt, messages })
+      text = gen.text
+      handoff = gen.handoff
+    }
+
+    return NextResponse.json({ reply: text, handoff, stage: currentStage, selectedService })
   } catch (err) {
     if (err instanceof AiError) {
       return NextResponse.json(

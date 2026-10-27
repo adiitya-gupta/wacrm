@@ -140,7 +140,7 @@ export function AiBusinessProfileEditor({
         <CardContent className="space-y-4">
           {(!profile.services || profile.services.length === 0) ? (
             <p className="rounded-lg border border-dashed border-border py-6 text-center text-sm text-muted-foreground">
-              No services configured yet. Click "Add Service" above to define your offerings.
+              No services configured yet. Click &quot;Add Service&quot; above to define your offerings.
             </p>
           ) : (
             profile.services.map((service, idx) => (

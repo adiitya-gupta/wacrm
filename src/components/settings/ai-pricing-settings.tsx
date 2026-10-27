@@ -4,7 +4,6 @@ import React from 'react';
 import { DollarSign, Plus, Trash2, Calendar, FileQuestion } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
 import {
   Card,
@@ -109,7 +108,7 @@ export function AiPricingSettings({
         <CardContent className="space-y-4">
           {(!profile.pricingPackages || profile.pricingPackages.length === 0) ? (
             <p className="rounded-lg border border-dashed border-border py-6 text-center text-sm text-muted-foreground">
-              No pricing packages defined yet. Click "Add Package" above.
+              No pricing packages defined yet. Click &quot;Add Package&quot; above.
             </p>
           ) : (
             profile.pricingPackages.map((pkg, idx) => (

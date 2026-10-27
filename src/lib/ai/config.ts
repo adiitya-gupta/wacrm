@@ -1,6 +1,11 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { decrypt } from '@/lib/whatsapp/encryption'
-import type { AiConfig } from './types'
+import type {
+  AiConfig,
+  AiBusinessProfile,
+  AiConversationFlowConfig,
+  AiMessageTemplates,
+} from './types'
 
 interface AiConfigRow {
   provider: 'openai' | 'anthropic' | 'openai_compatible'
@@ -13,9 +18,9 @@ interface AiConfigRow {
   auto_reply_max_per_conversation: number
   handoff_agent_id: string | null
   embeddings_api_key: string | null
-  business_profile?: any
-  conversation_flow?: any
-  message_templates?: any
+  business_profile?: AiBusinessProfile | null
+  conversation_flow?: AiConversationFlowConfig | null
+  message_templates?: AiMessageTemplates | null
 }
 
 const CONFIG_COLUMNS =
@@ -28,8 +33,8 @@ export async function loadAiConfig(
 ): Promise<AiConfig | null> {
   const { requireActive = true } = opts
 
-  let data: any
-  let error: any
+  let data: AiConfigRow | null = null
+  let error: { code?: string; message?: string } | null = null
 
   // Try selecting with extended business_profile and flow columns
   const primaryRes = await db
@@ -45,17 +50,17 @@ export async function loadAiConfig(
       .select(CONFIG_COLUMNS)
       .eq('account_id', accountId)
       .maybeSingle()
-    data = fallbackRes.data
+    data = fallbackRes.data as AiConfigRow | null
     error = fallbackRes.error
   } else {
-    data = primaryRes.data
+    data = primaryRes.data as AiConfigRow | null
     error = primaryRes.error
   }
 
   if (error) throw error
   if (!data) return null
 
-  const row = data as AiConfigRow
+  const row = data
   // The Playground passes requireActive:false so an admin can test the
   // agent before flipping the master switch on.
   if (requireActive && !row.is_active) return null

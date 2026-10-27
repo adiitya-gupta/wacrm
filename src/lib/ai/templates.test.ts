@@ -4,7 +4,6 @@ import {
   validateAllTemplates,
   renderTemplate,
   getEffectiveTemplate,
-  SUPPORTED_TEMPLATE_VARIABLES,
 } from './templates'
 
 describe('AI Message Templates Engine', () => {

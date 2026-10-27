@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { Smile, Globe, Target, Sliders } from 'lucide-react';
+import { Smile } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
@@ -55,7 +55,7 @@ export function AiPersonalitySettings({
               <Label>Conversational Tone</Label>
               <Select
                 value={profile.tone || 'consultative'}
-                onValueChange={(val: any) => updateField('tone', val)}
+                onValueChange={(val) => updateField('tone', val as AiBusinessProfile['tone'])}
                 disabled={disabled}
               >
                 <SelectTrigger>
@@ -85,7 +85,7 @@ export function AiPersonalitySettings({
               <Label>Response Length Preference</Label>
               <Select
                 value={profile.responseLength || 'concise'}
-                onValueChange={(val: any) => updateField('responseLength', val)}
+                onValueChange={(val) => updateField('responseLength', val as AiBusinessProfile['responseLength'])}
                 disabled={disabled}
               >
                 <SelectTrigger>
@@ -117,7 +117,7 @@ export function AiPersonalitySettings({
                 disabled={disabled}
               />
               <p className="text-[11px] text-muted-foreground">
-                The agent will mirror the customer's language while anchoring in this preference.
+                The agent will mirror the customer&apos;s language while anchoring in this preference.
               </p>
             </div>
 
@@ -125,7 +125,9 @@ export function AiPersonalitySettings({
               <Label>Primary Conversion Goal</Label>
               <Select
                 value={profile.primaryConversionGoal || 'schedule_consultation'}
-                onValueChange={(val: any) => updateField('primaryConversionGoal', val)}
+                onValueChange={(val) =>
+                  updateField('primaryConversionGoal', val as AiBusinessProfile['primaryConversionGoal'])
+                }
                 disabled={disabled}
               >
                 <SelectTrigger>

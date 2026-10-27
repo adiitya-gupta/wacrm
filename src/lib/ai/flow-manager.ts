@@ -6,7 +6,7 @@ import type {
   AiMessageTemplates,
   ChatMessage,
   DeterministicFlowState,
-  FlowStage,
+  FlowPresetType,
   ServiceItem,
   PricingPackage,
 } from './types'
@@ -31,6 +31,7 @@ import {
 } from '@/lib/scheduling/availability'
 import { bookMeeting, cancelMeeting } from '@/lib/scheduling/booking'
 import { generateReply } from './generate'
+import type { TimeSlot } from '@/types/meetings'
 
 export interface FlowManagerArgs {
   db: SupabaseClient
@@ -685,6 +686,21 @@ async function executeCalendarBooking(args: {
   }
 }
 
+export interface LeadQualificationRecord {
+  id: string
+  account_id: string
+  contact_id: string
+  conversation_id: string
+  state: string
+  qualification_notes?: string | null
+  flow_state?: DeterministicFlowState | null
+  requested_service?: string | null
+  proposed_slots?: TimeSlot[] | null
+  meeting_id?: string | null
+  selected_slot?: unknown
+  [key: string]: unknown
+}
+
 /**
  * Persist deterministic state with backward-compatible fallback to qualification_notes.
  */
@@ -693,13 +709,13 @@ async function persistFlowState(
   qualificationId: string,
   state: DeterministicFlowState,
   dbState: string,
-  proposedSlots?: any[],
+  proposedSlots?: TimeSlot[],
   meetingId?: string,
 ): Promise<void> {
   const summary = `${state.selectedServiceName ? `Service: ${state.selectedServiceName} | ` : ''}Stage: ${state.currentStage}`
   const notes = `${summary}\n---\n${JSON.stringify(state)}`
 
-  const payload: Record<string, any> = {
+  const payload: Record<string, unknown> = {
     state: dbState,
     requested_service: state.selectedServiceName || null,
     qualification_notes: notes,
@@ -742,14 +758,14 @@ async function loadOrCreateQualification(
   accountId: string,
   contactId: string,
   conversationId: string,
-): Promise<any> {
+): Promise<LeadQualificationRecord> {
   const { data } = await db
     .from('ai_lead_qualifications')
     .select('*')
     .eq('conversation_id', conversationId)
     .maybeSingle()
 
-  if (data) return data
+  if (data) return data as LeadQualificationRecord
 
   const { data: created, error } = await db
     .from('ai_lead_qualifications')
@@ -774,26 +790,26 @@ async function loadOrCreateQualification(
     }
   }
 
-  return created
+  return created as LeadQualificationRecord
 }
 
 /**
  * Deserialize deterministic flow state from database row.
  */
 export function deserializeFlowState(
-  row: any,
-  defaultPreset: any = 'service_to_conversion',
+  row: LeadQualificationRecord,
+  defaultPreset: FlowPresetType = 'service_to_conversion',
 ): DeterministicFlowState {
   if (row.flow_state && typeof row.flow_state === 'object' && row.flow_state.currentStage) {
-    return row.flow_state as DeterministicFlowState
+    return row.flow_state
   }
 
   // Fallback to parsing from qualification_notes
-  if (row.qualification_notes && row.qualification_notes.includes('---')) {
+  if (row.qualification_notes && typeof row.qualification_notes === 'string' && row.qualification_notes.includes('---')) {
     try {
       const jsonPart = row.qualification_notes.substring(row.qualification_notes.indexOf('---') + 3).trim()
       const parsed = JSON.parse(jsonPart)
-      if (parsed.currentStage) {
+      if (parsed && typeof parsed === 'object' && 'currentStage' in parsed) {
         return parsed as DeterministicFlowState
       }
     } catch {
@@ -854,7 +870,7 @@ function buildFlowSystemPrompt(args: {
     `Industry: ${profile.industry} | Target Customers: ${profile.targetCustomers}`,
     `Tone: ${profile.tone} | Language: ${profile.preferredLanguage} | Length: ${profile.responseLength}`,
     `Prospect Name: ${contactName || 'Valued Prospect'}`,
-    `Current Stage: ${state.currentStage}`,
+    `Current Stage: ${state.currentStage} | Active Preset: ${flowConfig.preset}`,
     '',
     '## CORE CONVERSATION QUALITY RULES (STRICT):',
     '1. ONE QUESTION PER MESSAGE: Never ask more than one question in a single reply.',

@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { GitBranch, CheckCircle2, ArrowRight, MessageSquare, DollarSign, Calendar, Users } from 'lucide-react';
+import { GitBranch, CheckCircle2, MessageSquare, DollarSign, Calendar, Users } from 'lucide-react';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import {
@@ -241,7 +241,9 @@ export function AiFlowSettings({
               <Label>Service Acknowledgement Style</Label>
               <Select
                 value={flowConfig.acknowledgementStyle || 'compliment_and_benefit'}
-                onValueChange={(val: any) => updateField('acknowledgementStyle', val)}
+                onValueChange={(val) =>
+                  updateField('acknowledgementStyle', val as AiConversationFlowConfig['acknowledgementStyle'])
+                }
                 disabled={disabled}
               >
                 <SelectTrigger>
@@ -260,7 +262,7 @@ export function AiFlowSettings({
                 </SelectContent>
               </Select>
               <p className="text-[11px] text-muted-foreground">
-                Controls the tone when acknowledging a customer's selected service.
+                Controls the tone when acknowledging a customer&apos;s selected service.
               </p>
             </div>
           </div>

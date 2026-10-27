@@ -15,7 +15,6 @@ import {
 import { sendTypingIndicator } from '@/lib/whatsapp/meta-api'
 import { checkRateLimit, RATE_LIMITS } from '@/lib/rate-limit'
 import { checkAccountQuota, incrementAccountUsage } from '@/lib/billing/quota'
-import { processOpsiysLeadConversation } from './opsiys-agent'
 import { processConversationFlow } from './flow-manager'
 
 interface DispatchArgs {

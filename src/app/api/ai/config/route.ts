@@ -35,8 +35,14 @@ export async function GET() {
     const cols =
       'provider, model, base_url, system_prompt, is_active, auto_reply_enabled, auto_reply_max_per_conversation, handoff_agent_id, api_key, embeddings_api_key'
 
-    let data: any
-    let error: any
+    interface ConfigFetchRow {
+      api_key?: string | null
+      embeddings_api_key?: string | null
+      [key: string]: unknown
+    }
+
+    let data: ConfigFetchRow | null = null
+    let error: { code?: string; message?: string } | null = null
     const primaryRes = await supabase
       .from('ai_configs')
       .select(`${cols}, business_profile, conversation_flow, message_templates`)
@@ -49,10 +55,10 @@ export async function GET() {
         .select(cols)
         .eq('account_id', accountId)
         .maybeSingle()
-      data = fallbackRes.data
+      data = fallbackRes.data as ConfigFetchRow | null
       error = fallbackRes.error
     } else {
-      data = primaryRes.data
+      data = primaryRes.data as ConfigFetchRow | null
       error = primaryRes.error
     }
 

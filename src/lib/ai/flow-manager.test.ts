@@ -1,13 +1,12 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import {
   processConversationFlow,
   resolveEffectiveBusinessProfile,
   matchServiceFromCatalog,
-  formatPricingPackages,
-  deserializeFlowState,
 } from './flow-manager'
-import type { AiConfig, ChatMessage, ServiceItem, PricingPackage } from './types'
-import { OPSIYS_DEFAULT_BUSINESS_PROFILE, DEFAULT_AI_BUSINESS_PROFILE } from './defaults'
+import type { AiConfig, ChatMessage, ServiceItem } from './types'
+import { DEFAULT_AI_BUSINESS_PROFILE } from './defaults'
+import type { SupabaseClient } from '@supabase/supabase-js'
 
 vi.mock('@/lib/scheduling/availability', () => ({
   getAvailableSlots: vi.fn().mockResolvedValue([
@@ -45,10 +44,10 @@ vi.mock('./generate', () => ({
   }),
 }))
 
-function createMockSupabase(initialState: any = null) {
-  let storedRow: any = initialState
+function createMockSupabase(initialState: Record<string, unknown> | null = null) {
+  let storedRow: Record<string, unknown> | null = initialState
   return {
-    from: vi.fn().mockImplementation((table: string) => ({
+    from: vi.fn().mockImplementation((_table: string) => ({
       select: vi.fn().mockReturnValue({
         eq: vi.fn().mockReturnValue({
           maybeSingle: vi.fn().mockImplementation(() =>
@@ -59,7 +58,7 @@ function createMockSupabase(initialState: any = null) {
           ),
         }),
       }),
-      insert: vi.fn().mockImplementation((payload: any) => {
+      insert: vi.fn().mockImplementation((payload: Record<string, unknown>) => {
         storedRow = { id: 'qual-123', ...payload }
         return {
           select: vi.fn().mockReturnValue({
@@ -67,7 +66,7 @@ function createMockSupabase(initialState: any = null) {
           }),
         }
       }),
-      update: vi.fn().mockImplementation((updates: any) => {
+      update: vi.fn().mockImplementation((updates: Record<string, unknown>) => {
         storedRow = { ...storedRow, ...updates }
         return {
           eq: vi.fn().mockResolvedValue({ error: null }),
@@ -75,7 +74,7 @@ function createMockSupabase(initialState: any = null) {
       }),
     })),
     __getStored: () => storedRow,
-  } as any
+  } as unknown as SupabaseClient
 }
 
 describe('Deterministic Conversation Flow Manager', () => {
@@ -168,7 +167,6 @@ describe('Deterministic Conversation Flow Manager', () => {
 
   it('Stage C: Directly handles pricing inquiry when customer asks for pricing or chooses option 1', async () => {
     process.env.OPSIYS_ACCOUNT_ID = 'acct-opsiys-1'
-    const db = createMockSupabase()
 
     // Customer already has email automation selected, then asks "What is your pricing?"
     const existingState = {

@@ -270,7 +270,7 @@ export function AiTemplatesEditor({
               {previewText}
             </div>
             <p className="text-[11px] text-muted-foreground">
-              Simulated preview with sample variables. Real WhatsApp deliveries use the customer's actual context.
+              Simulated preview with sample variables. Real WhatsApp deliveries use the customer&apos;s actual context.
             </p>
           </div>
         </CardContent>

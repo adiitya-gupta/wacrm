@@ -6,6 +6,7 @@ import {
   Loader2,
   Sparkles,
   CheckCircle2,
+  AlertCircle,
   Trash2,
   Eye,
   EyeOff,
@@ -17,6 +18,7 @@ import {
   KeyRound,
   Save,
 } from 'lucide-react';
+import { cn } from '@/lib/utils';
 import { useAuth } from '@/hooks/use-auth';
 import { canEditSettings } from '@/lib/auth/roles';
 import { Button } from '@/components/ui/button';
@@ -126,6 +128,59 @@ export function AiConfig() {
   );
 
   const loadedAccountIdRef = useRef<string | null>(null);
+  const savedSnapshotRef = useRef<string | null>(null);
+
+  const buildSnapshot = useCallback(() => {
+    return JSON.stringify({
+      provider,
+      model: model.trim(),
+      baseUrl: baseUrl.trim(),
+      systemPrompt: systemPrompt.trim(),
+      isActive,
+      autoReplyEnabled,
+      maxPerConversation,
+      handoffAgentId,
+      apiKey: keyEdited ? apiKey.trim() : hasStoredKey ? 'STORED' : '',
+      embeddingsKey: embeddingsKeyEdited ? embeddingsKey.trim() : hasStoredEmbeddingsKey ? 'STORED' : '',
+      businessProfile,
+      conversationFlow,
+      messageTemplates,
+    });
+  }, [
+    provider,
+    model,
+    baseUrl,
+    systemPrompt,
+    isActive,
+    autoReplyEnabled,
+    maxPerConversation,
+    handoffAgentId,
+    apiKey,
+    keyEdited,
+    hasStoredKey,
+    embeddingsKey,
+    embeddingsKeyEdited,
+    hasStoredEmbeddingsKey,
+    businessProfile,
+    conversationFlow,
+    messageTemplates,
+  ]);
+
+  const isDirty =
+    savedSnapshotRef.current !== null &&
+    buildSnapshot() !== savedSnapshotRef.current;
+
+  // Prevent accidental loss of unsaved changes when closing tab or reloading
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (isDirty) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [isDirty]);
 
   const fetchConfig = useCallback(async () => {
     setLoading(true);
@@ -136,6 +191,11 @@ export function AiConfig() {
         toast.error(data.error ?? t('loadFailed'));
         return;
       }
+
+      let loadedBusinessProfile = DEFAULT_AI_BUSINESS_PROFILE;
+      let loadedConversationFlow = DEFAULT_AI_CONVERSATION_FLOW;
+      let loadedMessageTemplates = DEFAULT_AI_MESSAGE_TEMPLATES;
+
       if (data.configured) {
         setConfigured(true);
         setProvider(data.provider);
@@ -152,33 +212,54 @@ export function AiConfig() {
         setHasStoredEmbeddingsKey(Boolean(data.has_embeddings_key));
         setEmbeddingsKey(data.has_embeddings_key ? MASKED_KEY : '');
         setEmbeddingsKeyEdited(false);
-
-        // Load multi-tenant business profile, flow, and templates if saved
-        if (data.business_profile && typeof data.business_profile === 'object') {
-          setBusinessProfile((prev) => ({
-            ...prev,
-            ...data.business_profile,
-          }));
-        }
-        if (data.conversation_flow && typeof data.conversation_flow === 'object') {
-          setConversationFlow((prev) => ({
-            ...prev,
-            ...data.conversation_flow,
-          }));
-        }
-        if (data.message_templates && typeof data.message_templates === 'object') {
-          setMessageTemplates((prev) => ({
-            ...prev,
-            ...data.message_templates,
-          }));
-        }
       }
+
+      // Load multi-tenant business profile, flow, and templates if saved.
+      // These are loaded REGARDLESS of data.configured so profile data persists reliably across reloads.
+      if (data.business_profile && typeof data.business_profile === 'object') {
+        loadedBusinessProfile = {
+          ...DEFAULT_AI_BUSINESS_PROFILE,
+          ...data.business_profile,
+        };
+        setBusinessProfile(loadedBusinessProfile);
+      }
+      if (data.conversation_flow && typeof data.conversation_flow === 'object') {
+        loadedConversationFlow = {
+          ...DEFAULT_AI_CONVERSATION_FLOW,
+          ...data.conversation_flow,
+        };
+        setConversationFlow(loadedConversationFlow);
+      }
+      if (data.message_templates && typeof data.message_templates === 'object') {
+        loadedMessageTemplates = {
+          ...DEFAULT_AI_MESSAGE_TEMPLATES,
+          ...data.message_templates,
+        };
+        setMessageTemplates(loadedMessageTemplates);
+      }
+
+      // Initialize saved snapshot
+      savedSnapshotRef.current = JSON.stringify({
+        provider: data.configured ? data.provider : provider,
+        model: data.configured ? (data.model || '').trim() : model.trim(),
+        baseUrl: (data.base_url ?? '').trim(),
+        systemPrompt: (data.system_prompt ?? '').trim(),
+        isActive: Boolean(data.is_active),
+        autoReplyEnabled: Boolean(data.auto_reply_enabled),
+        maxPerConversation: data.auto_reply_max_per_conversation ?? 3,
+        handoffAgentId: data.handoff_agent_id ?? '',
+        apiKey: data.has_key ? 'STORED' : '',
+        embeddingsKey: data.has_embeddings_key ? 'STORED' : '',
+        businessProfile: loadedBusinessProfile,
+        conversationFlow: loadedConversationFlow,
+        messageTemplates: loadedMessageTemplates,
+      });
     } catch {
       toast.error(t('loadFailed'));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [provider, model, t]);
 
   useEffect(() => {
     if (!accountId || loadedAccountIdRef.current === accountId) return;
@@ -244,17 +325,18 @@ export function AiConfig() {
   };
 
   const handleSave = async () => {
-    if (!model.trim()) {
+    const isEnablingAi = isActive || autoReplyEnabled;
+    if (isEnablingAi && !model.trim()) {
       toast.error(t('missingModel'));
       setActiveSubTab('credentials');
       return;
     }
-    if (provider === 'openai_compatible' && !baseUrl.trim()) {
+    if (isEnablingAi && provider === 'openai_compatible' && !baseUrl.trim()) {
       toast.error(t('missingBaseUrl'));
       setActiveSubTab('credentials');
       return;
     }
-    if (!configured && !keyEdited) {
+    if (isEnablingAi && !configured && !keyEdited) {
       toast.error(t('missingApiKey'));
       setActiveSubTab('credentials');
       return;
@@ -323,7 +405,16 @@ export function AiConfig() {
           title={t('title')}
           description="Configure your multi-tenant business profile, conversational flows, verified pricing, and message templates."
         />
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-3">
+          {isDirty ? (
+            <span className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 px-2.5 py-1 rounded-full">
+              <AlertCircle className="h-3 w-3" /> Unsaved changes
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/60 px-2.5 py-1 rounded-full">
+              <CheckCircle2 className="h-3 w-3" /> All changes saved
+            </span>
+          )}
           <Button
             onClick={handleSave}
             disabled={disabled}
@@ -337,6 +428,47 @@ export function AiConfig() {
             Save Configuration
           </Button>
         </div>
+      </div>
+
+      {/* Conversation Owner Status Banner */}
+      <div className="rounded-lg border border-border bg-card p-4 shadow-xs">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+              Active Conversation Owner:
+            </span>
+            <span
+              className={cn(
+                'inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold',
+                (conversationFlow.conversationMode ?? 'ai_agent') === 'ai_agent'
+                  ? 'bg-primary/10 text-primary border border-primary/20'
+                  : 'bg-muted text-foreground border border-border',
+              )}
+            >
+              <Sparkles className="h-3 w-3" />
+              {(conversationFlow.conversationMode ?? 'ai_agent') === 'ai_agent'
+                ? 'AI Agent First (Recommended)'
+                : conversationFlow.conversationMode === 'flow_first'
+                  ? 'Visual Flow First'
+                  : 'Automation First'}
+            </span>
+          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setActiveSubTab('flow')}
+            className="text-xs text-muted-foreground hover:text-foreground h-7"
+          >
+            Change Mode in Flows & Stages &rarr;
+          </Button>
+        </div>
+        <p className="mt-2 text-xs text-muted-foreground leading-relaxed">
+          {(conversationFlow.conversationMode ?? 'ai_agent') === 'ai_agent'
+            ? 'The AI Agent owns customer-facing conversational replies, answering queries and qualifying leads naturally. Background automations execute without conflicting text.'
+            : conversationFlow.conversationMode === 'flow_first'
+              ? 'Active visual flow owns structured dialogue with branching interactive buttons. AI responds only upon explicit handoff.'
+              : 'Matching conversational automations own initial replies; AI acts as fallback when no automation responds.'}
+        </p>
       </div>
 
       {!canEdit && (
@@ -693,10 +825,21 @@ export function AiConfig() {
           <span />
         )}
 
-        <Button onClick={handleSave} disabled={disabled}>
-          {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-          Save Configuration
-        </Button>
+        <div className="flex items-center gap-3">
+          {isDirty ? (
+            <span className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 px-2.5 py-1 rounded-full">
+              <AlertCircle className="h-3 w-3" /> Unsaved changes
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/60 px-2.5 py-1 rounded-full">
+              <CheckCircle2 className="h-3 w-3" /> All changes saved
+            </span>
+          )}
+          <Button onClick={handleSave} disabled={disabled}>
+            {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+            Save Configuration
+          </Button>
+        </div>
       </div>
     </div>
   );

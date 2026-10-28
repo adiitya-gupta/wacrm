@@ -32,12 +32,24 @@ export async function GET() {
   try {
     const { supabase, accountId } = await getCurrentAccount()
 
+    // 1. Fetch account metadata to ensure business_profile, conversation_flow, and message_templates
+    // are ALWAYS retrieved even if migration 053 columns are not yet in ai_configs or if ai_configs is unconfigured.
+    const { data: accountRow } = await supabase
+      .from('accounts')
+      .select('metadata')
+      .eq('id', accountId)
+      .maybeSingle()
+    const accMeta = (accountRow?.metadata as Record<string, unknown>) ?? {}
+
     const cols =
       'provider, model, base_url, system_prompt, is_active, auto_reply_enabled, auto_reply_max_per_conversation, handoff_agent_id, api_key, embeddings_api_key'
 
     interface ConfigFetchRow {
       api_key?: string | null
       embeddings_api_key?: string | null
+      business_profile?: unknown
+      conversation_flow?: unknown
+      message_templates?: unknown
       [key: string]: unknown
     }
 
@@ -70,7 +82,21 @@ export async function GET() {
       )
     }
 
-    if (!data) return NextResponse.json({ configured: false })
+    const businessProfile = data?.business_profile ?? accMeta.ai_business_profile ?? null
+    const conversationFlow = data?.conversation_flow ?? accMeta.ai_conversation_flow ?? null
+    const messageTemplates = data?.message_templates ?? accMeta.ai_message_templates ?? null
+
+    if (!data) {
+      return NextResponse.json({
+        configured: false,
+        has_key: false,
+        has_embeddings_key: false,
+        business_profile: businessProfile,
+        conversation_flow: conversationFlow,
+        message_templates: messageTemplates,
+      })
+    }
+
     // The keys are selected only to derive the has_* flags; neither is
     // returned to the client.
     const { api_key, embeddings_api_key, ...safe } = data
@@ -79,6 +105,9 @@ export async function GET() {
       has_key: !!api_key,
       has_embeddings_key: !!embeddings_api_key,
       ...safe,
+      business_profile: businessProfile,
+      conversation_flow: conversationFlow,
+      message_templates: messageTemplates,
     })
   } catch (err) {
     return toErrorResponse(err)
@@ -155,6 +184,51 @@ export async function POST(request: Request) {
         : ''
     const clearEmbeddingsKey = body.embeddings_api_key === null
 
+    // 1. Validate templates if provided
+    if (body.message_templates && typeof body.message_templates === 'object') {
+      const tplValidation = validateAllTemplates(body.message_templates)
+      if (!tplValidation.valid) {
+        const firstErr = Object.values(tplValidation.errors)[0]
+        return bad(firstErr || 'Invalid message templates')
+      }
+    }
+
+    // 2. Persist multi-tenant business profile, conversation flow, and message templates into accounts.metadata
+    // This guarantees persistence across page reloads and tenant isolation even if ai_configs table columns are missing.
+    const { data: currentAcc } = await supabase
+      .from('accounts')
+      .select('metadata')
+      .eq('id', accountId)
+      .maybeSingle()
+
+    const existingMeta = (currentAcc?.metadata as Record<string, unknown>) ?? {}
+    const updatedMeta: Record<string, unknown> = { ...existingMeta }
+    let hasMetaChanges = false
+
+    if (body.business_profile && typeof body.business_profile === 'object') {
+      updatedMeta.ai_business_profile = body.business_profile
+      hasMetaChanges = true
+    }
+    if (body.conversation_flow && typeof body.conversation_flow === 'object') {
+      updatedMeta.ai_conversation_flow = body.conversation_flow
+      hasMetaChanges = true
+    }
+    if (body.message_templates && typeof body.message_templates === 'object') {
+      updatedMeta.ai_message_templates = body.message_templates
+      hasMetaChanges = true
+    }
+
+    if (hasMetaChanges) {
+      const { error: metaErr } = await supabase
+        .from('accounts')
+        .update({ metadata: updatedMeta })
+        .eq('id', accountId)
+      if (metaErr) {
+        console.error('[ai/config POST] failed to update accounts.metadata:', metaErr)
+        return NextResponse.json({ error: t('ai.saveConfigFailed') }, { status: 500 })
+      }
+    }
+
     // Reuse the stored key when the form didn't send a fresh one.
     const { data: existing } = await supabase
       .from('ai_configs')
@@ -162,7 +236,15 @@ export async function POST(request: Request) {
       .eq('account_id', accountId)
       .maybeSingle()
 
-    let apiKeyPlain: string
+    // If there is no existing key and no new key provided:
+    // If user is not attempting to activate AI, saving the business profile / templates is complete.
+    if (!rawKey && !existing) {
+      if (isActive || autoReplyEnabled) {
+        return bad(t('ai.apiKeyRequired'))
+      }
+      return NextResponse.json({ success: true, configured: false })
+    }
+
     let baseUrl: string | null = null
     if (provider === 'openai_compatible') {
       const candidate = baseUrlProvided
@@ -170,30 +252,21 @@ export async function POST(request: Request) {
         : existing?.provider === 'openai_compatible'
           ? (existing.base_url ?? '').trim()
           : ''
-      if (!candidate) return bad(t('ai.baseUrlRequired'))
-      try {
-        normalizeOpenAiCompatibleBaseUrl(candidate)
-      } catch (err) {
-        return bad(err instanceof AiError ? err.message : t('ai.baseUrlInvalid'))
+      if (rawKey || (existing && (isActive || autoReplyEnabled))) {
+        if (!candidate) return bad(t('ai.baseUrlRequired'))
+        try {
+          normalizeOpenAiCompatibleBaseUrl(candidate)
+        } catch (err) {
+          return bad(err instanceof AiError ? err.message : t('ai.baseUrlInvalid'))
+        }
       }
-      baseUrl = candidate
-    }
-    if (rawKey) {
-      apiKeyPlain = rawKey
-    } else if (existing?.api_key && canReuseStoredAiKey(existing, provider, baseUrl)) {
-      try {
-        apiKeyPlain = decrypt(existing.api_key)
-      } catch {
-        return bad(t('ai.storedKeyReenter'))
-      }
-    } else {
-      return bad(t('ai.apiKeyRequired'))
+      baseUrl = candidate || null
     }
 
-    // Only spend a provider round-trip when the credentials that affect
-    // reachability actually changed. A save that just flips a toggle or
-    // edits the system prompt on an existing, already-validated config
-    // skips the call — no wasted token/latency on the account's key.
+    // Only spend a provider round-trip when credentials that affect
+    // reachability actually changed. If credentials did not change, we avoid
+    // unnecessary provider calls and avoid failing if the stored encrypted key
+    // cannot be decrypted during a non-credential save.
     const credentialsChanged =
       !existing ||
       rawKey !== '' ||
@@ -201,7 +274,20 @@ export async function POST(request: Request) {
       model !== existing.model ||
       baseUrl !== (existing.base_url ?? null)
 
+    let apiKeyPlain: string
     if (credentialsChanged) {
+      if (rawKey) {
+        apiKeyPlain = rawKey
+      } else if (existing?.api_key && canReuseStoredAiKey(existing, provider, baseUrl)) {
+        try {
+          apiKeyPlain = decrypt(existing.api_key)
+        } catch {
+          return bad(t('ai.storedKeyReenter'))
+        }
+      } else {
+        return bad(t('ai.apiKeyRequired'))
+      }
+
       try {
         await validateAiCredentials({
           provider,
@@ -256,11 +342,6 @@ export async function POST(request: Request) {
     }
 
     if (body.message_templates && typeof body.message_templates === 'object') {
-      const tplValidation = validateAllTemplates(body.message_templates)
-      if (!tplValidation.valid) {
-        const firstErr = Object.values(tplValidation.errors)[0]
-        return bad(firstErr || 'Invalid message templates')
-      }
       shared.message_templates = body.message_templates
     }
     if (body.business_profile && typeof body.business_profile === 'object') {
@@ -306,11 +387,11 @@ export async function POST(request: Request) {
           { status: 500 },
         )
       }
-    } else {
+    } else if (encryptedKey) {
       const insertPayload: Record<string, unknown> = {
         account_id: accountId,
         created_by: userId,
-        api_key: encryptedKey, // guaranteed non-null: rawKey required when no existing row
+        api_key: encryptedKey,
         ...shared,
       }
       let { error: insErr } = await supabase.from('ai_configs').insert(insertPayload)

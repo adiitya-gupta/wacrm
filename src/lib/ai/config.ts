@@ -100,7 +100,33 @@ export async function loadAiConfig(
     }
   }
 
-  const rawFlow = row.conversation_flow as (AiConversationFlowConfig & { conversation_mode?: ConversationMode; conversationMode?: ConversationMode }) | null
+  let businessProfile = row.business_profile ?? null
+  let conversationFlow = row.conversation_flow ?? null
+  let messageTemplates = row.message_templates ?? null
+
+  if (!businessProfile || !conversationFlow || !messageTemplates) {
+    try {
+      const { data: acc } = await db
+        .from('accounts')
+        .select('metadata')
+        .eq('id', accountId)
+        .maybeSingle()
+      const meta = (acc?.metadata as Record<string, unknown>) ?? {}
+      if (!businessProfile && meta.ai_business_profile) {
+        businessProfile = meta.ai_business_profile as AiBusinessProfile
+      }
+      if (!conversationFlow && meta.ai_conversation_flow) {
+        conversationFlow = meta.ai_conversation_flow as AiConversationFlowConfig
+      }
+      if (!messageTemplates && meta.ai_message_templates) {
+        messageTemplates = meta.ai_message_templates as AiMessageTemplates
+      }
+    } catch (e) {
+      console.warn('[loadAiConfig] accounts.metadata fallback query error:', e)
+    }
+  }
+
+  const rawFlow = (conversationFlow ?? row.conversation_flow) as (AiConversationFlowConfig & { conversation_mode?: ConversationMode; conversationMode?: ConversationMode }) | null
   const conversationMode: ConversationMode =
     rawFlow?.conversationMode ??
     rawFlow?.conversation_mode ??
@@ -117,9 +143,9 @@ export async function loadAiConfig(
     autoReplyMaxPerConversation: row.auto_reply_max_per_conversation,
     handoffAgentId: row.handoff_agent_id,
     embeddingsApiKey,
-    businessProfile: row.business_profile ?? null,
-    conversationFlow: row.conversation_flow ?? null,
-    messageTemplates: row.message_templates ?? null,
+    businessProfile,
+    conversationFlow,
+    messageTemplates,
     conversationMode,
   }
 }

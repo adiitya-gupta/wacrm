@@ -87,6 +87,22 @@ vi.mock('@supabase/supabase-js', () => ({
         return builder
       }
 
+      if (table === 'accounts') {
+        const builder = {
+          select: vi.fn(() => builder),
+          eq: vi.fn(() => builder),
+          maybeSingle: vi.fn(async () => ({
+            data: { id: 'tenant-1-account', metadata: {} },
+            error: null,
+          })),
+          single: vi.fn(async () => ({
+            data: { id: 'tenant-1-account', metadata: {} },
+            error: null,
+          })),
+        }
+        return builder
+      }
+
       if (table === 'ai_configs') {
         const builder = {
           select: vi.fn(() => builder),

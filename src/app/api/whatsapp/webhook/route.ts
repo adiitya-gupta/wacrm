@@ -22,6 +22,8 @@ import { readCappedBody } from '@/lib/whatsapp/webhook-body'
 import { resumeAwaitingReply, runAutomationsForTrigger } from '@/lib/automations/engine'
 import { dispatchInboundToFlows } from '@/lib/flows/engine'
 import { dispatchInboundToAiReply } from '@/lib/ai/auto-reply'
+import { loadAiConfig, resolveConversationMode } from '@/lib/ai/config'
+import type { AiConfig, ConversationMode } from '@/lib/ai/types'
 import { dispatchWebhookEvent } from '@/lib/webhooks/deliver'
 import {
   handleTemplateWebhookChange,
@@ -889,6 +891,27 @@ async function processMessage(
   await flagBroadcastReplyIfAny(accountId, contactRecord.id)
 
   // ============================================================
+  // Resolve conversation mode & AI availability.
+  // Single conversational owner policy:
+  // - `ai_agent` (default when enabled): AI Agent owns natural dialogue,
+  //   greetings, and qualification. Background automations execute without
+  //   competing text replies.
+  // - `flow_first`: Structured flow owns the conversation.
+  // - `automation_first`: Conversational automations own dialogue.
+  // ============================================================
+  let aiConfig: AiConfig | null = null
+  try {
+    aiConfig = await loadAiConfig(supabaseAdmin(), accountId, {
+      requireActive: false,
+      requireDecryptedKey: false,
+    })
+  } catch (err) {
+    console.warn('[webhook] failed to load AI config for mode resolution:', err)
+  }
+  const isAiActive = !!(aiConfig?.isActive && aiConfig?.autoReplyEnabled)
+  const conversationMode: ConversationMode = resolveConversationMode(aiConfig)
+
+  // ============================================================
   // Flow runner dispatch.
   //
   // If the runner consumes the message (it either advanced an active
@@ -926,6 +949,7 @@ async function processMessage(
             meta_message_id: message.id,
           },
     isFirstInboundMessage,
+    conversationMode,
   })
   const flowConsumed = flowResult.consumed
 
@@ -992,8 +1016,17 @@ async function processMessage(
   // logging zero steps. `runAutomationsForTrigger` owns its own try/catch
   // and never throws; the `.catch` is belt-and-braces so one trigger
   // type's failure can't skip the rest of the loop.
+  // When AI Agent owns the conversation, or when a Flow consumed the message,
+  // suppress customer-facing replies from automations so they don't send competing
+  // duplicate greetings or conflicting messages. Non-conversational steps (tagging,
+  // contact updates, deals, webhooks) still execute freely.
+  const suppressConversationalReplies =
+    (conversationMode === 'ai_agent' && isAiActive) ||
+    (conversationMode === 'flow_first' && flowConsumed)
+
+  let automationReplied = false
   for (const triggerType of automationTriggers) {
-    await runAutomationsForTrigger({
+    const dispatchOutcome = await runAutomationsForTrigger({
       accountId,
       triggerType,
       contactId: contactRecord.id,
@@ -1004,15 +1037,23 @@ async function processMessage(
         // trigger's exact-id match.
         interactive_reply_id: interactiveReplyId ?? undefined,
       },
-    }).catch((err) => console.error('[automations] dispatch failed:', err))
+      suppressConversationalReplies,
+    }).catch((err) => {
+      console.error('[automations] dispatch failed:', err)
+      return undefined
+    })
+    if (dispatchOutcome && dispatchOutcome.repliedCount > 0) {
+      automationReplied = true
+    }
   }
 
   // AI auto-reply. Runs only for plain-text inbound the deterministic
-  // flow runner did NOT consume (flows win over the LLM), and only when
-  // the account has enabled it. Awaited inside `after()` (same reason as
-  // the webhook dispatch below); `dispatchInboundToAiReply` owns its
+  // flow runner did NOT consume (flows win over the LLM), no active automation
+  // sent a customer-facing reply (preventing double-reply races), and only
+  // when the account has enabled it. Awaited inside `after()` (same reason
+  // as the webhook dispatch below); `dispatchInboundToAiReply` owns its
   // eligibility gates + try/catch and never throws.
-  if (!contentConsumed && !interactiveReplyId && inboundText.trim()) {
+  if (!contentConsumed && !automationReplied && !interactiveReplyId && inboundText.trim()) {
     console.info(`[webhook] dispatching inbound message ${message.id} to AI auto-reply (account: ${accountId}, conversation: ${conversation.id})`)
     await dispatchInboundToAiReply({
       accountId,
@@ -1022,7 +1063,11 @@ async function processMessage(
       // Lets the bot show "typing…" (and mark the message read) while
       // the reply is generated.
       inboundMessageId: message.id,
+      automationReplied: false,
+      conversationMode,
     })
+  } else if (automationReplied) {
+    console.info(`[webhook] skipping AI auto-reply: message ${message.id} was already answered by an automation`)
   } else if (!inboundText.trim()) {
     console.info(`[webhook] skipping AI auto-reply: message ${message.id} has no text content`)
   } else if (interactiveReplyId) {

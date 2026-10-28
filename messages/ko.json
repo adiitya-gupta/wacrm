@@ -2316,6 +2316,7 @@
       "askName": "성함이 어떻게 되시나요?",
       "askEmail": "감사합니다, {name}님! 업무용 이메일 주소를 알려주세요.",
       "askCompany": "거의 끝났습니다 — 회사 이름이 무엇인가요?",
+      "handoffMessage": "감사합니다, {name}님! 입력해주신 정보가 전달되었으며 담당자가 곧 연락드리겠습니다.",
       "handoffNote": "신규 리드 — 이름={name}, 이메일={email}, 회사={company}."
     }
   },

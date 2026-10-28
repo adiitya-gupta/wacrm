@@ -34,13 +34,15 @@ vi.mock('./admin-client', () => ({
   supabaseAdmin: () => ({
     from: (table: string) => {
       if (table === 'automations') {
-        // .select().eq().eq().in().limit() → active auto-responders
-        const chain = {
+        // active auto-responders query
+        const chain: Record<string, unknown> = {
           select: () => chain,
           eq: () => chain,
           in: () => chain,
           limit: () =>
             Promise.resolve({ data: h.state.autoResponders, error: null }),
+          then: (resolve: (val: unknown) => void) =>
+            resolve({ data: h.state.autoResponders, error: null }),
         }
         return chain
       }
@@ -135,12 +137,44 @@ describe('dispatchInboundToAiReply — eligibility gates', () => {
     expect(systemPrompt).toContain('Returns accepted within 30 days.')
   })
 
-  it('stands down when an active message-level automation exists', async () => {
+  it('stands down when an active message-level automation exists in automation_first mode', async () => {
     h.state.autoResponders = [{ id: 'auto-1' }]
-    await dispatchInboundToAiReply(ARGS)
+    await dispatchInboundToAiReply({ ...ARGS, conversationMode: 'automation_first' })
     expect(h.generateReply).not.toHaveBeenCalled()
     expect(h.engineSendText).not.toHaveBeenCalled()
     expect(h.sendTypingIndicator).not.toHaveBeenCalled()
+  })
+
+  it('stands down when automationReplied is true', async () => {
+    await dispatchInboundToAiReply({ ...ARGS, automationReplied: true })
+    expect(h.generateReply).not.toHaveBeenCalled()
+    expect(h.engineSendText).not.toHaveBeenCalled()
+  })
+
+  it('stands down when a keyword automation matches incoming message in automation_first mode', async () => {
+    h.state.autoResponders = [
+      { id: 'auto-kw', trigger_type: 'keyword_match', trigger_config: { keywords: ['hi', 'hello'] } } as unknown as { id: string },
+    ]
+    h.buildConversationContext.mockResolvedValue([{ role: 'user', content: 'hi there' }])
+    await dispatchInboundToAiReply({ ...ARGS, conversationMode: 'automation_first' })
+    expect(h.generateReply).not.toHaveBeenCalled()
+    expect(h.engineSendText).not.toHaveBeenCalled()
+  })
+
+  it('does NOT stand down when an active keyword automation does NOT match incoming message in automation_first mode', async () => {
+    h.state.autoResponders = [
+      { id: 'auto-kw', trigger_type: 'keyword_match', trigger_config: { keywords: ['refund', 'cancel'] } } as unknown as { id: string },
+    ]
+    h.buildConversationContext.mockResolvedValue([{ role: 'user', content: 'What are your services?' }])
+    await dispatchInboundToAiReply({ ...ARGS, conversationMode: 'automation_first' })
+    expect(h.engineSendText).toHaveBeenCalled()
+  })
+
+  it('does NOT stand down in ai_agent mode even if message-level automation exists (unless automationReplied is true)', async () => {
+    h.state.autoResponders = [{ id: 'auto-1' }]
+    await dispatchInboundToAiReply({ ...ARGS, conversationMode: 'ai_agent' })
+    expect(h.generateReply).toHaveBeenCalled()
+    expect(h.engineSendText).toHaveBeenCalled()
   })
 
   it('does not send when the atomic slot claim loses the race', async () => {

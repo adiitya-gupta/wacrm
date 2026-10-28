@@ -198,11 +198,10 @@ export function NodeConfigForm({
 
     case "handoff":
       return (
-        <TextRow
-          label={t("internalNote")}
-          value={(cfg as { note?: string }).note ?? ""}
-          onChange={(v) => onUpdateConfig({ note: v })}
-          rows={2}
+        <HandoffForm
+          cfg={cfg as HandoffCfg}
+          onUpdateConfig={onUpdateConfig}
+          t={t}
         />
       );
 
@@ -834,6 +833,80 @@ function SetTagForm({
         label={t("thenAdvanceTo")}
       />
     </>
+  );
+}
+
+// ============================================================
+// handoff
+// ============================================================
+
+interface HandoffCfg {
+  target?: "human" | "ai_agent";
+  assign_to?: string;
+  note?: string;
+  handoff_message?: string;
+  instruction?: string;
+}
+
+function HandoffForm({
+  cfg,
+  onUpdateConfig,
+  t,
+}: {
+  cfg: HandoffCfg;
+  onUpdateConfig: (patch: Record<string, unknown>) => void;
+  t: ReturnType<typeof useTranslations>;
+}) {
+  const target = cfg.target ?? "human";
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <label className="mb-1 block text-xs font-medium text-foreground">
+          {t("handoffTarget") || "Handoff Destination"}
+        </label>
+        <Select
+          value={target}
+          onValueChange={(v) =>
+            onUpdateConfig({ target: v as "human" | "ai_agent" })
+          }
+        >
+          <SelectTrigger className="bg-muted">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="human">Human Agent (Inbox Queue)</SelectItem>
+            <SelectItem value="ai_agent">AI Agent (Conversational Brain)</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+
+      <TextRow
+        label={t("customerMessage") || "Customer Message (Optional farewell before handoff)"}
+        value={cfg.handoff_message ?? ""}
+        onChange={(v) => onUpdateConfig({ handoff_message: v })}
+        placeholder="e.g. Connecting you to our specialist now..."
+        rows={2}
+      />
+
+      {target === "human" ? (
+        <TextRow
+          label={t("internalNote")}
+          value={cfg.note ?? ""}
+          onChange={(v) => onUpdateConfig({ note: v })}
+          placeholder="Internal note for inbox agents"
+          rows={2}
+        />
+      ) : (
+        <TextRow
+          label="AI Agent Guidance / Objective"
+          value={cfg.instruction ?? ""}
+          onChange={(v) => onUpdateConfig({ instruction: v })}
+          placeholder="e.g. Help customer schedule a consultation or answer product pricing questions"
+          rows={2}
+        />
+      )}
+    </div>
   );
 }
 

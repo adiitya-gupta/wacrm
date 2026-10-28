@@ -287,6 +287,7 @@ const LEAD_CAPTURE: FlowTemplate = {
       node_key: "handoff",
       node_type: "handoff",
       config: {
+        handoff_message: t("lead_capture.handoffMessage", { name: "{{vars.name}}" }),
         note: t("lead_capture.handoffNote", {
           name: "{{vars.name}}",
           email: "{{vars.email}}",

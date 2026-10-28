@@ -57,6 +57,7 @@ import {
   type SendMessageNodeConfig,
   type SetTagNodeConfig,
   type StartNodeConfig,
+  type HandoffNodeConfig,
   type KeywordTriggerConfig,
 } from "./types";
 
@@ -337,7 +338,17 @@ async function findEntryFlow(
   accountId: string,
   message: ParsedInbound,
   isFirstInbound: boolean,
+  conversationMode?: "ai_agent" | "flow_first" | "automation_first",
 ): Promise<FlowRow | null> {
+  // When an account is configured for `ai_agent` ownership, the AI Agent
+  // owns natural conversation, greetings, and qualification. Unprompted
+  // plain-text inbound messages (such as "hello" or generic greetings)
+  // must not start a competing visual flow. Flows only start in `ai_agent`
+  // mode if triggered by an explicit interactive reply (such as a menu tap).
+  if (conversationMode === "ai_agent" && message.kind !== "interactive_reply") {
+    return null;
+  }
+
   // A tap used to be rejected outright here, on the reasoning that
   // interactive replies are responses to existing prompts. That holds
   // only while a prompt is outstanding — and this function runs solely
@@ -481,23 +492,80 @@ async function executeHandoff(
   run: FlowRunRow,
   node: FlowNodeRow,
 ): Promise<void> {
-  const cfg = node.config as { assign_to?: string; note?: string };
+  const cfg = node.config as HandoffNodeConfig;
+  const isAiTarget = cfg.target === "ai_agent";
+
+  // Sync captured lead vars to contacts table so data is never lost
+  if (run.contact_id && run.vars) {
+    const contactUpdates: Record<string, string> = {};
+    if (typeof run.vars.name === "string" && run.vars.name.trim()) {
+      contactUpdates.name = run.vars.name.trim();
+    }
+    if (typeof run.vars.email === "string" && run.vars.email.trim()) {
+      contactUpdates.email = run.vars.email.trim();
+    }
+    if (typeof run.vars.company === "string" && run.vars.company.trim()) {
+      contactUpdates.company = run.vars.company.trim();
+    }
+    if (Object.keys(contactUpdates).length > 0) {
+      await db
+        .from("contacts")
+        .update(contactUpdates)
+        .eq("id", run.contact_id);
+    }
+  }
+
+  // Send handoff message if configured (or safe default if none provided to avoid dead-end silence)
+  const messageToSend = cfg.handoff_message ?? (
+    run.vars?.name
+      ? `Thank you ${run.vars.name}! Our team has received your details and will be in touch shortly.`
+      : undefined
+  );
+
+  if (messageToSend && run.conversation_id && run.contact_id) {
+    try {
+      await engineSendText({
+        accountId: run.account_id,
+        userId: run.user_id,
+        conversationId: run.conversation_id,
+        contactId: run.contact_id,
+        text: interpolateVars(messageToSend, run.vars),
+      });
+    } catch (err) {
+      console.warn("[flows] handoff message send failed:", err);
+    }
+  }
+
   const convUpdate: Record<string, unknown> = {
-    status: "pending",
     updated_at: new Date().toISOString(),
   };
-  if (cfg.assign_to) convUpdate.assigned_agent_id = cfg.assign_to;
+
+  if (isAiTarget) {
+    convUpdate.ai_autoreply_disabled = false;
+    convUpdate.status = "open";
+    if (cfg.instruction) {
+      convUpdate.ai_handoff_summary = `Delegated from flow: ${cfg.instruction}`;
+    }
+  } else {
+    convUpdate.status = "pending";
+    if (cfg.assign_to) convUpdate.assigned_agent_id = cfg.assign_to;
+  }
+
   if (run.conversation_id) {
     await db
       .from("conversations")
       .update(convUpdate)
       .eq("id", run.conversation_id);
   }
+
   await logEvent(db, run.id, "handoff", node.node_key, {
     note: cfg.note ?? null,
-    assigned_to: cfg.assign_to ?? null,
+    assigned_to: isAiTarget ? null : cfg.assign_to ?? null,
+    target: cfg.target ?? "human",
+    instruction: cfg.instruction ?? null,
   });
-  await endRun(db, run.id, "handed_off", "handoff_node");
+
+  await endRun(db, run.id, "handed_off", isAiTarget ? "delegated_to_ai" : "handoff_node");
 }
 
 /**
@@ -561,7 +629,7 @@ async function evaluateConditionNode(
  */
 function interpolateVars(template: string, vars: Record<string, unknown>): string {
   if (!template) return "";
-  return template.replace(/\{\{vars\.([a-zA-Z0-9_]+)\}\}/g, (_, key) => {
+  return template.replace(/\{\{(?:vars\.)?([a-zA-Z0-9_]+)\}\}/g, (_, key) => {
     const v = vars[key];
     return v === undefined || v === null ? "" : String(v);
   });
@@ -958,6 +1026,7 @@ export async function dispatchInboundToFlows(
       input.accountId,
       input.message,
       input.isFirstInboundMessage,
+      input.conversationMode,
     );
     if (!flow || !flow.entry_node_id) {
       return { consumed: false, outcome: "no_match" };
@@ -1125,6 +1194,25 @@ async function handleReplyForActiveRun(
       });
     }
     return { consumed: true, flow_run_id: run.id, outcome: "fallback_fired" };
+  }
+  if (action.type === "delegate_ai") {
+    if (run.conversation_id) {
+      await db
+        .from("conversations")
+        .update({
+          ai_autoreply_disabled: false,
+          status: "open",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", run.conversation_id);
+    }
+    await logEvent(db, run.id, "handoff", run.current_node_key, {
+      reason: "delegated_to_ai",
+      target: "ai_agent",
+    });
+    await endRun(db, run.id, "handed_off", "delegated_to_ai");
+    // Return consumed: false so the inbound text falls through to AI auto-reply
+    return { consumed: false, flow_run_id: run.id, outcome: "handed_off" };
   }
   if (action.type === "handoff") {
     if (run.conversation_id) {

@@ -58,6 +58,15 @@ export interface DispatchInput {
   triggerType: AutomationTriggerType
   contactId?: string | null
   context?: AutomationContext
+  suppressConversationalReplies?: boolean
+}
+
+export interface AutomationDispatchResult {
+  matchedCount: number
+  executedCount: number
+  repliedCount: number
+  tookOwnershipCount: number
+  backgroundOnlyCount: number
 }
 
 /**
@@ -68,7 +77,16 @@ export interface DispatchInput {
  * All errors are caught and logged; per-automation failures are
  * recorded into automation_logs with status='failed'.
  */
-export async function runAutomationsForTrigger(input: DispatchInput): Promise<void> {
+export async function runAutomationsForTrigger(
+  input: DispatchInput,
+): Promise<AutomationDispatchResult> {
+  const result: AutomationDispatchResult = {
+    matchedCount: 0,
+    executedCount: 0,
+    repliedCount: 0,
+    tookOwnershipCount: 0,
+    backgroundOnlyCount: 0,
+  }
   try {
     const db = supabaseAdmin()
 
@@ -88,11 +106,11 @@ export async function runAutomationsForTrigger(input: DispatchInput): Promise<vo
         .maybeSingle()
       if (ownErr) {
         console.error('[automations] contact ownership check failed:', ownErr)
-        return
+        return result
       }
       if (!owned) {
         console.warn('[automations] contact not in account, refusing dispatch', input.contactId)
-        return
+        return result
       }
     }
 
@@ -111,14 +129,14 @@ export async function runAutomationsForTrigger(input: DispatchInput): Promise<vo
         .maybeSingle()
       if (convErr) {
         console.error('[automations] conversation ownership check failed:', convErr)
-        return
+        return result
       }
       if (!conv) {
         console.warn(
           '[automations] conversation not in account, refusing dispatch',
           input.context.conversation_id,
         )
-        return
+        return result
       }
     }
 
@@ -131,20 +149,30 @@ export async function runAutomationsForTrigger(input: DispatchInput): Promise<vo
 
     if (error) {
       console.error('[automations] fetch failed:', error)
-      return
+      return result
     }
-    if (!automations || automations.length === 0) return
+    if (!automations || automations.length === 0) return result
 
     for (const automation of automations as Automation[]) {
       if (!triggerMatches(automation, input.context)) continue
+      result.matchedCount++
       try {
-        await executeAutomation(automation, input)
+        const execOutcome = await executeAutomation(automation, input)
+        result.executedCount++
+        if (execOutcome?.replied) {
+          result.repliedCount++
+          result.tookOwnershipCount++
+        } else {
+          result.backgroundOnlyCount++
+        }
       } catch (err) {
         console.error('[automations] execute failed:', automation.id, err)
       }
     }
+    return result
   } catch (err) {
     console.error('[automations] dispatch failed:', err)
+    return result
   }
 }
 
@@ -167,6 +195,7 @@ export async function resumePendingExecution(pending: {
   branch: 'yes' | 'no' | null
   next_step_position: number
   context: AutomationContext
+  created_at?: string
 }): Promise<void> {
   const db = supabaseAdmin()
   const { data: automation, error } = await db
@@ -179,6 +208,80 @@ export async function resumePendingExecution(pending: {
     console.error('[automations] resume: missing automation', pending.automation_id, error)
     await markPending(pending.id, 'failed')
     return
+  }
+
+  // Safety Gate 1: Check Opt-Out and Human Handoff status
+  if (pending.contact_id && pending.context.conversation_id) {
+    const { data: conv } = await db
+      .from('conversations')
+      .select('status, assigned_agent_id, ai_autoreply_disabled')
+      .eq('id', pending.context.conversation_id)
+      .eq('account_id', pending.account_id)
+      .maybeSingle()
+
+    if (conv) {
+      if (conv.ai_autoreply_disabled) {
+        console.info(`[automations] pending execution ${pending.id} cancelled: contact opted out`)
+        await markPending(pending.id, 'cancelled')
+        await setLogError(pending.log_id, 'Execution cancelled: contact has opted out')
+        return
+      }
+      if (conv.assigned_agent_id || conv.status === 'pending') {
+        console.info(`[automations] pending execution ${pending.id} cancelled: conversation handed off to human`)
+        await markPending(pending.id, 'cancelled')
+        await setLogError(pending.log_id, 'Execution cancelled: conversation handed off to human agent')
+        return
+      }
+    }
+
+    // Safety Gate 2: Customer Reply Check (cancel follow-ups if customer already replied)
+    if (pending.created_at) {
+      const { data: replies } = await db
+        .from('messages')
+        .select('created_at')
+        .eq('conversation_id', pending.context.conversation_id)
+        .eq('direction', 'inbound')
+        .gt('created_at', pending.created_at)
+        .limit(1)
+
+      if (replies && replies.length > 0) {
+        console.info(`[automations] pending execution ${pending.id} cancelled: customer already replied`)
+        await markPending(pending.id, 'cancelled')
+        await setLogError(pending.log_id, 'Follow-up reminder cancelled: customer has already replied')
+        return
+      }
+    }
+
+    // Safety Gate 3: WhatsApp 24h Messaging Window Compliance
+    const { data: nextStep } = await db
+      .from('automation_steps')
+      .select('step_type')
+      .eq('automation_id', pending.automation_id)
+      .eq('position', pending.next_step_position)
+      .maybeSingle()
+
+    if (nextStep?.step_type === 'send_message') {
+      const { data: lastInbound } = await db
+        .from('messages')
+        .select('created_at')
+        .eq('conversation_id', pending.context.conversation_id)
+        .eq('direction', 'inbound')
+        .order('created_at', { ascending: false })
+        .limit(1)
+
+      if (lastInbound && lastInbound[0]?.created_at) {
+        const elapsedMs = Date.now() - new Date(lastInbound[0].created_at).getTime()
+        if (elapsedMs > 24 * 60 * 60 * 1000) {
+          console.warn(`[automations] pending execution ${pending.id} failed: 24h WhatsApp window expired for send_message`)
+          await markPending(pending.id, 'failed')
+          await setLogError(
+            pending.log_id,
+            'Cannot send free-form message outside 24h WhatsApp service window; requires approved template',
+          )
+          return
+        }
+      }
+    }
   }
 
   try {
@@ -373,8 +476,10 @@ async function executeAutomation(automation: Automation, input: DispatchInput) {
 
   if (logErr || !log) {
     console.error('[automations] cannot create log:', logErr)
-    return
+    return { replied: false }
   }
+
+  const tracker = { replied: false }
 
   await executeStepsFrom({
     automation,
@@ -385,6 +490,8 @@ async function executeAutomation(automation: Automation, input: DispatchInput) {
     startPosition: 0,
     logId: log.id,
     triggerEvent: input.triggerType,
+    tracker,
+    suppressConversationalReplies: input.suppressConversationalReplies,
   })
 
   // Atomic counter update via the SQL function from migration 007.
@@ -397,6 +504,8 @@ async function executeAutomation(automation: Automation, input: DispatchInput) {
   if (rpcErr) {
     console.error('[automations] increment counter failed:', rpcErr)
   }
+
+  return { replied: tracker.replied }
 }
 
 interface ExecuteArgs {
@@ -408,6 +517,8 @@ interface ExecuteArgs {
   startPosition: number
   logId: string | null
   triggerEvent: string
+  tracker?: { replied: boolean }
+  suppressConversationalReplies?: boolean
 }
 
 /**
@@ -510,7 +621,33 @@ async function executeStepsFrom(args: ExecuteArgs): Promise<ScopeOutcome> {
         continue
       }
 
+      if (
+        args.suppressConversationalReplies &&
+        (step.step_type === 'send_message' ||
+          step.step_type === 'send_buttons' ||
+          step.step_type === 'send_list' ||
+          step.step_type === 'send_template')
+      ) {
+        results.push({
+          step_id: step.id,
+          step_type: step.step_type,
+          status: 'success',
+          detail: 'conversational reply suppressed by conversation ownership policy (AI Agent owns conversation)',
+        })
+        continue
+      }
+
       const detail = await runStep(step, args)
+      if (
+        step.step_type === 'send_message' ||
+        step.step_type === 'send_buttons' ||
+        step.step_type === 'send_list' ||
+        step.step_type === 'send_template'
+      ) {
+        if (args.tracker) {
+          args.tracker.replied = true
+        }
+      }
       if (waitsForReply(step)) {
         await parkForReply(step, args)
         results.push({
@@ -1157,7 +1294,7 @@ async function setLogError(logId: string | null, errorMessage: string) {
     .eq('id', logId)
 }
 
-async function markPending(id: string, status: 'done' | 'failed' | 'expired') {
+async function markPending(id: string, status: 'done' | 'failed' | 'expired' | 'cancelled') {
   await supabaseAdmin()
     .from('automation_pending_executions')
     .update({ status })

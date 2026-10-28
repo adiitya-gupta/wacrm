@@ -255,13 +255,15 @@ describe('WhatsApp Webhook — Inbound Message Persistence & AI Trigger Executio
 
     // 2. Verify AI reply dispatch was called
     expect(dispatchInboundToAiReply).toHaveBeenCalledTimes(1)
-    expect(dispatchInboundToAiReply).toHaveBeenCalledWith({
-      accountId: 'tenant-1-account',
-      conversationId: 'conv-1',
-      contactId: 'contact-1',
-      configOwnerUserId: 'user-1',
-      inboundMessageId: 'wamid.inbound-test-001',
-    })
+    expect(dispatchInboundToAiReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        accountId: 'tenant-1-account',
+        conversationId: 'conv-1',
+        contactId: 'contact-1',
+        configOwnerUserId: 'user-1',
+        inboundMessageId: 'wamid.inbound-test-001',
+      }),
+    )
   })
 
   it('idempotently ignores duplicate webhook replays without double-dispatching to AI', async () => {

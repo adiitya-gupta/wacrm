@@ -47,7 +47,7 @@ vi.mock('./generate', () => ({
 function createMockSupabase(initialState: Record<string, unknown> | null = null) {
   let storedRow: Record<string, unknown> | null = initialState
   return {
-    from: vi.fn().mockImplementation((_table: string) => ({
+    from: vi.fn().mockImplementation(() => ({
       select: vi.fn().mockReturnValue({
         eq: vi.fn().mockReturnValue({
           maybeSingle: vi.fn().mockImplementation(() =>
@@ -389,5 +389,175 @@ describe('Deterministic Conversation Flow Manager', () => {
 
     // Should NOT ask another discovery question; should present service options
     expect(result.text).toContain('Which of our core services would make the biggest difference')
+  })
+
+  describe('Work Email Collection & Multi-Turn Conversation Continuity', () => {
+    const services: ServiceItem[] = [
+      { id: 'srv-1', name: 'WhatsApp Automation & AI Chatbots', description: 'Automate WhatsApp conversations', keywords: ['whatsapp', 'bot'], benefits: ['save time and improve conversions'] },
+      { id: 'srv-2', name: 'Email & Marketing Automation', description: 'Automate email marketing and campaigns', keywords: ['email', 'campaign'], benefits: ['nurture leads automatically'] },
+      { id: 'srv-3', name: 'Modern Web & Application Development', description: 'Custom full-stack web applications', keywords: ['web', 'app'], benefits: ['high performance modern UI'] },
+    ]
+
+    it('matchServiceFromCatalog does not false-positive on customer stating their work email', () => {
+      expect(matchServiceFromCatalog('siddharth@boyz.com', services)).toBeNull()
+      expect(matchServiceFromCatalog('My work email is siddharth@boyz.com', services)).toBeNull()
+      expect(matchServiceFromCatalog('Here is my email: siddharth@example.com', services)).toBeNull()
+      expect(matchServiceFromCatalog('email: contact@company.io', services)).toBeNull()
+
+      // Should still match when real email service intent is expressed
+      const emailService = matchServiceFromCatalog('We need email marketing automation for our leads', services)
+      expect(emailService).not.toBeNull()
+      expect(emailService?.id).toBe('srv-2')
+    })
+
+    it('Traces complete multi-turn conversation past work-email step through service selection and pricing', async () => {
+      const contactUpdates: Record<string, unknown> = {}
+      let storedRow: Record<string, unknown> | null = null
+      const mockDb = {
+        from: vi.fn().mockImplementation((table: string) => {
+          if (table === 'contacts') {
+            return {
+              select: vi.fn().mockReturnValue({
+                eq: vi.fn().mockReturnValue({
+                  eq: vi.fn().mockReturnValue({
+                    maybeSingle: vi.fn().mockResolvedValue({ data: { id: 'contact-1', user_id: 'user-1', name: 'Siddharth' }, error: null }),
+                  }),
+                }),
+              }),
+              update: vi.fn().mockImplementation((updates: Record<string, unknown>) => {
+                Object.assign(contactUpdates, updates)
+                return {
+                  eq: vi.fn().mockResolvedValue({ error: null }),
+                }
+              }),
+            }
+          }
+          if (table === 'conversations') {
+            return {
+              select: vi.fn().mockReturnValue({
+                eq: vi.fn().mockReturnValue({
+                  eq: vi.fn().mockReturnValue({
+                    maybeSingle: vi.fn().mockResolvedValue({ data: { id: 'conv-1', user_id: 'user-1' }, error: null }),
+                  }),
+                }),
+              }),
+            }
+          }
+          return {
+            select: vi.fn().mockReturnValue({
+              eq: vi.fn().mockReturnValue({
+                maybeSingle: vi.fn().mockImplementation(() =>
+                  Promise.resolve({ data: storedRow, error: null }),
+                ),
+                single: vi.fn().mockImplementation(() =>
+                  Promise.resolve({ data: storedRow, error: null }),
+                ),
+              }),
+            }),
+            insert: vi.fn().mockImplementation((payload: Record<string, unknown>) => {
+              storedRow = { id: 'qual-test-123', ...payload }
+              return {
+                select: vi.fn().mockReturnValue({
+                  single: vi.fn().mockResolvedValue({ data: storedRow, error: null }),
+                }),
+              }
+            }),
+            update: vi.fn().mockImplementation((updates: Record<string, unknown>) => {
+              storedRow = { ...storedRow, ...updates }
+              return {
+                eq: vi.fn().mockResolvedValue({ error: null }),
+              }
+            }),
+          }
+        }),
+      } as unknown as SupabaseClient
+
+      // Step 1: Customer sends work email in response to "Thanks Siddharth Pandey! What's your work email?"
+      const messagesTurn1: ChatMessage[] = [
+        { role: 'user', content: 'hello' },
+        { role: 'assistant', content: "Welcome! What's your name?" },
+        { role: 'user', content: 'Siddharth Pandey' },
+        { role: 'assistant', content: "Thanks Siddharth Pandey! What's your work email?" },
+        { role: 'user', content: 'siddharth@boyz.com' },
+      ]
+
+      const testConfig: AiConfig = {
+        ...baseConfig,
+        businessProfile: {
+          ...DEFAULT_AI_BUSINESS_PROFILE,
+          services,
+        },
+      }
+
+      const resultTurn1 = await processConversationFlow({
+        db: mockDb,
+        accountId: 'acct-opsiys',
+        conversationId: 'conv-123',
+        contactId: 'contact-123',
+        messages: messagesTurn1,
+        config: testConfig,
+        contactName: 'Siddharth Pandey',
+      })
+
+      // Verification 1: Email extracted & persisted to contacts table
+      expect(resultTurn1.state.informationCollected['email']).toBe('siddharth@boyz.com')
+      expect(contactUpdates.email).toBe('siddharth@boyz.com')
+
+      // Verification 2: Does NOT false-positive match Email Marketing service
+      expect(resultTurn1.state.selectedService).toBeNull()
+
+      // Verification 3: Acknowledges email receipt by name, presents service catalog, and does NOT hand off or halt
+      expect(resultTurn1.handoff).toBe(false)
+      expect(resultTurn1.text).toContain('Thanks Siddharth Pandey!')
+      expect(resultTurn1.text).toContain('noted your work email (siddharth@boyz.com)')
+      expect(resultTurn1.text).toContain('Which of our core services would make the biggest difference')
+      expect(resultTurn1.state.currentStage).toBe('STAGE_A_UNDERSTAND')
+
+      // Step 2: Customer replies with service selection (e.g. "1" or "WhatsApp Automation")
+      const messagesTurn2: ChatMessage[] = [
+        ...messagesTurn1,
+        { role: 'assistant', content: resultTurn1.text },
+        { role: 'user', content: 'WhatsApp Automation' },
+      ]
+
+      const resultTurn2 = await processConversationFlow({
+        db: mockDb,
+        accountId: 'acct-opsiys',
+        conversationId: 'conv-123',
+        contactId: 'contact-123',
+        messages: messagesTurn2,
+        config: testConfig,
+        contactName: 'Siddharth Pandey',
+      })
+
+      // Verification 4: Clean transition to STAGE_B_ACKNOWLEDGE_SERVICE
+      expect(resultTurn2.handoff).toBe(false)
+      expect(resultTurn2.state.currentStage).toBe('STAGE_B_ACKNOWLEDGE_SERVICE')
+      expect(resultTurn2.state.selectedServiceName).toContain('WhatsApp Automation')
+      expect(resultTurn2.text).toContain('1. Explore pricing')
+      expect(resultTurn2.text).toContain('2. Book a consultation')
+
+      // Step 3: Customer replies with "1" to explore pricing
+      const messagesTurn3: ChatMessage[] = [
+        ...messagesTurn2,
+        { role: 'assistant', content: resultTurn2.text },
+        { role: 'user', content: '1' },
+      ]
+
+      const resultTurn3 = await processConversationFlow({
+        db: mockDb,
+        accountId: 'acct-opsiys',
+        conversationId: 'conv-123',
+        contactId: 'contact-123',
+        messages: messagesTurn3,
+        config: testConfig,
+        contactName: 'Siddharth Pandey',
+      })
+
+      // Verification 5: Clean transition to STAGE_C_PRICING without halting
+      expect(resultTurn3.handoff).toBe(false)
+      expect(resultTurn3.state.currentStage).toBe('STAGE_C_PRICING')
+      expect(resultTurn3.text).toBeTruthy()
+    })
   })
 })

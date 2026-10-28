@@ -76,8 +76,18 @@ export type FlowPresetType =
   | 'human_handoff'
   | 'custom'
 
+/**
+ * Account-level conversational ownership mode:
+ * - `ai_agent`: AI Agent owns natural dialogue, greetings, and qualification; background automations run non-conflicting actions.
+ * - `flow_first`: Visual Flow owns structured conversation; AI is invoked via explicit handoff or fallback.
+ * - `automation_first`: Conversational automations own dialogue.
+ */
+export type ConversationMode = 'ai_agent' | 'flow_first' | 'automation_first'
+
 export interface AiConversationFlowConfig {
   preset: FlowPresetType
+  conversationMode?: ConversationMode
+  conversation_mode?: ConversationMode
   maxDiscoveryQuestions: number
   requireDiscoveryBeforePricing: boolean
   offerConsultationAfterPricing: boolean
@@ -171,6 +181,8 @@ export interface AiConfig {
   conversationFlow?: AiConversationFlowConfig | null
   /** Tenant-specific message templates */
   messageTemplates?: AiMessageTemplates | null
+  /** Account conversation mode */
+  conversationMode?: ConversationMode
 }
 
 /** A single conversation turn in the shape both providers accept. */

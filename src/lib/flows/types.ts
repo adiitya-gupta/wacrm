@@ -105,6 +105,12 @@ export interface HandoffNodeConfig {
    * node fires. Leave unset to flip the status without assignment.
    */
   assign_to?: string;
+  /** Target to hand off to: 'human' (default) or 'ai_agent'. */
+  target?: "human" | "ai_agent";
+  /** Optional message sent to the customer right before handoff. */
+  handoff_message?: string;
+  /** Optional guidance/instruction passed to the handoff context. */
+  instruction?: string;
 }
 
 /**
@@ -287,13 +293,13 @@ export interface FlowRunRow {
 
 export interface FlowFallbackPolicy {
   /** What to do when the customer reply doesn't match any option. */
-  on_unknown_reply: "reprompt" | "handoff" | "ignore";
+  on_unknown_reply: "reprompt" | "handoff" | "ignore" | "delegate_ai";
   /** Max reprompts before applying `on_exhaust`. */
   max_reprompts: number;
   /** Stale-run sweep cutoff. */
   on_timeout_hours: number;
   /** What to do once max_reprompts has been hit. */
-  on_exhaust: "handoff" | "end";
+  on_exhaust: "handoff" | "end" | "delegate_ai";
 }
 
 export const DEFAULT_FALLBACK_POLICY: FlowFallbackPolicy = {
@@ -339,6 +345,7 @@ export interface DispatchInboundInput {
   contactId: string;
   conversationId: string;
   message: ParsedInbound;
+  conversationMode?: "ai_agent" | "flow_first" | "automation_first";
 }
 
 export interface DispatchInboundResult {

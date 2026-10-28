@@ -1,11 +1,18 @@
 'use client';
 
 import React from 'react';
-import { Plus, Trash2, Briefcase, ShieldAlert, Sparkles } from 'lucide-react';
+import { Plus, Trash2, Briefcase, ShieldAlert, Sparkles, Wand2 } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import {
   Card,
   CardContent,
@@ -14,6 +21,7 @@ import {
   CardDescription,
 } from '@/components/ui/card';
 import type { AiBusinessProfile, ServiceItem } from '@/lib/ai/types';
+import { INDUSTRY_PRESETS, type IndustryPresetKey } from '@/lib/ai/defaults';
 
 interface AiBusinessProfileProps {
   profile: AiBusinessProfile;
@@ -26,11 +34,24 @@ export function AiBusinessProfileEditor({
   onChange,
   disabled = false,
 }: AiBusinessProfileProps) {
+  const [selectedPreset, setSelectedPreset] = React.useState<string>('');
+
   const updateField = <K extends keyof AiBusinessProfile>(
     field: K,
     value: AiBusinessProfile[K],
   ) => {
     onChange({ ...profile, [field]: value });
+  };
+
+  const handleApplyPreset = (presetKey: string | null) => {
+    if (!presetKey) return;
+    setSelectedPreset(presetKey);
+    const preset = INDUSTRY_PRESETS[presetKey as IndustryPresetKey];
+    if (!preset) return;
+    onChange({
+      ...preset.profile,
+      businessName: profile.businessName?.trim() ? profile.businessName : preset.profile.businessName,
+    });
   };
 
   const addService = () => {
@@ -57,6 +78,40 @@ export function AiBusinessProfileEditor({
 
   return (
     <div className="space-y-6">
+      {/* 0. Industry Quick-Start Presets */}
+      <Card className="border-primary/20 bg-primary/[0.03]">
+        <CardHeader className="pb-3">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="space-y-1">
+              <CardTitle className="flex items-center gap-2 text-base font-semibold">
+                <Wand2 className="h-4 w-4 text-primary" /> Industry Quick-Start Presets
+              </CardTitle>
+              <CardDescription>
+                Populate your AI Agent with verified industry profiles, catalogs, pricing rules, and guardrails.
+              </CardDescription>
+            </div>
+            <div className="w-full sm:w-[260px]">
+              <Select
+                value={selectedPreset}
+                onValueChange={handleApplyPreset}
+                disabled={disabled}
+              >
+                <SelectTrigger className="bg-background">
+                  <SelectValue placeholder="Select industry preset..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {Object.values(INDUSTRY_PRESETS).map((preset) => (
+                    <SelectItem key={preset.key} value={preset.key}>
+                      {preset.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+        </CardHeader>
+      </Card>
+
       {/* 1. Core Business Profile */}
       <Card>
         <CardHeader>

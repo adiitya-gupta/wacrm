@@ -121,4 +121,23 @@ describe("decideFallback", () => {
       type: "handoff",
     });
   });
+
+  it("returns delegate_ai immediately when on_unknown_reply is 'delegate_ai'", () => {
+    expect(
+      decideFallback({
+        policy: { ...POLICY_REPROMPT_2_HANDOFF, on_unknown_reply: "delegate_ai" },
+        reprompt_count: 1,
+      }),
+    ).toEqual({ type: "delegate_ai" });
+  });
+
+  it("escalates to delegate_ai when on_exhaust is 'delegate_ai'", () => {
+    const policy: FlowFallbackPolicy = {
+      ...POLICY_REPROMPT_2_HANDOFF,
+      on_exhaust: "delegate_ai",
+    };
+    expect(decideFallback({ policy, reprompt_count: 3 })).toEqual({
+      type: "delegate_ai",
+    });
+  });
 });

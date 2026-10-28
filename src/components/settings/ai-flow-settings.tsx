@@ -91,6 +91,87 @@ export function AiFlowSettings({
 
   return (
     <div className="space-y-6">
+      {/* 0. Conversational Ownership Mode */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <MessageSquare className="h-4 w-4 text-primary" /> Conversation Mode & Ownership
+          </CardTitle>
+          <CardDescription>
+            Deterministic conversational ownership policy ensuring exactly one engine responds to the customer, avoiding contradictory duplicate messages.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="grid gap-3 sm:grid-cols-3">
+            {[
+              {
+                id: 'ai_agent' as const,
+                title: 'AI Agent First (Recommended)',
+                description:
+                  'AI Agent owns natural conversation, greetings, and qualification. Background automations (tags, deals, webhooks) run freely without competing replies.',
+                badge: 'Single Owner',
+              },
+              {
+                id: 'flow_first' as const,
+                title: 'Visual Flow First',
+                description:
+                  'A configured Flow owns structured dialogue. AI is only engaged via explicit flow handoff or fallback.',
+                badge: 'Structured Flow',
+              },
+              {
+                id: 'automation_first' as const,
+                title: 'Automation First',
+                description:
+                  'Conversational automations own dialogue. AI Agent acts as fallback when no automation replies.',
+                badge: 'Rule Based',
+              },
+            ].map((mode) => {
+              const currentMode = flowConfig.conversationMode ?? 'ai_agent';
+              const isSelected = currentMode === mode.id;
+              return (
+                <div
+                  key={mode.id}
+                  onClick={() =>
+                    !disabled &&
+                    onChange({
+                      ...flowConfig,
+                      conversationMode: mode.id,
+                      conversation_mode: mode.id,
+                    })
+                  }
+                  className={cn(
+                    'relative flex cursor-pointer flex-col justify-between rounded-lg border p-4 transition-all',
+                    isSelected
+                      ? 'border-primary bg-primary/5 shadow-xs ring-1 ring-primary'
+                      : 'border-border hover:border-muted-foreground/40 bg-card',
+                    disabled && 'pointer-events-none opacity-60',
+                  )}
+                >
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-semibold text-foreground">
+                        {mode.title}
+                      </span>
+                      {isSelected && (
+                        <CheckCircle2 className="h-4 w-4 text-primary" />
+                      )}
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      {mode.description}
+                    </p>
+                  </div>
+                  <div className="mt-3">
+                    <span className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+                      {mode.badge}
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </CardContent>
+      </Card>
+
       {/* 1. Preset Selector */}
       <Card>
         <CardHeader>

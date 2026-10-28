@@ -31,6 +31,7 @@ import {
 } from '@/lib/scheduling/availability'
 import { bookMeeting, cancelMeeting } from '@/lib/scheduling/booking'
 import { generateReply } from './generate'
+import { dispatchAiOutcomeEvent } from './events'
 import type { TimeSlot } from '@/types/meetings'
 
 export interface FlowManagerArgs {
@@ -97,6 +98,8 @@ export function resolveEffectiveFlowConfig(
   return DEFAULT_AI_CONVERSATION_FLOW
 }
 
+export const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/i
+
 /**
  * Find matching service from tenant catalog based on user input.
  */
@@ -107,9 +110,27 @@ export function matchServiceFromCatalog(
   if (!text || services.length === 0) return null
   const lower = text.toLowerCase()
 
+  const isStatingEmail =
+    EMAIL_REGEX.test(text) ||
+    lower.includes('work email') ||
+    lower.includes('my email') ||
+    lower.startsWith('email:') ||
+    /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(text.trim())
+
+  const hasEmailServiceIntent =
+    lower.includes('email marketing') ||
+    lower.includes('email automation') ||
+    lower.includes('email campaign') ||
+    lower.includes('cold email') ||
+    lower.includes('newsletter')
+
   // 1. Direct name match
   for (const s of services) {
-    if (lower.includes(s.name.toLowerCase())) {
+    const sLower = s.name.toLowerCase()
+    if (sLower.includes('email') && isStatingEmail && !hasEmailServiceIntent) {
+      continue
+    }
+    if (lower.includes(sLower)) {
       return s
     }
   }
@@ -118,7 +139,11 @@ export function matchServiceFromCatalog(
   for (const s of services) {
     if (s.keywords && s.keywords.length > 0) {
       for (const kw of s.keywords) {
-        if (lower.includes(kw.toLowerCase())) {
+        const kwLower = kw.toLowerCase()
+        if (kwLower === 'email' && isStatingEmail && !hasEmailServiceIntent) {
+          continue
+        }
+        if (lower.includes(kwLower)) {
           return s
         }
       }
@@ -128,8 +153,12 @@ export function matchServiceFromCatalog(
   // 3. Common industry pattern match
   for (const s of services) {
     const sLower = s.name.toLowerCase()
+    const matchesEmailPattern =
+      sLower.includes('email') &&
+      (hasEmailServiceIntent || (!isStatingEmail && lower.includes('email')))
+
     if (
-      (lower.includes('email') && sLower.includes('email')) ||
+      matchesEmailPattern ||
       (lower.includes('whatsapp') && sLower.includes('whatsapp')) ||
       (lower.includes('lead') && sLower.includes('lead')) ||
       (lower.includes('bot') && (sLower.includes('bot') || sLower.includes('agent'))) ||
@@ -204,6 +233,57 @@ export async function processConversationFlow(
   const lowerUserText = userText.toLowerCase()
   const now = new Date()
 
+  let effectiveContactName = contactName || (state.informationCollected['name'] as string) || null
+
+  // Extract contact information (email, name)
+  const emailMatch = userText.match(EMAIL_REGEX)
+  let extractedEmail: string | null = null
+  if (emailMatch) {
+    extractedEmail = emailMatch[0].trim()
+    state.informationCollected['email'] = extractedEmail
+    void Promise.resolve(
+      db
+        .from('contacts')
+        .update({ email: extractedEmail, updated_at: new Date().toISOString() })
+        .eq('id', contactId)
+    ).catch((err: unknown) => console.warn('[flow-manager] failed to update contact email:', err))
+  }
+
+  const priorAssistantTurn = [...messages].reverse().find((m) => m.role === 'assistant')
+  const priorAssistantText = (priorAssistantTurn?.content || '').toLowerCase()
+  const askedForEmail = priorAssistantText.includes('email')
+  const askedForName =
+    priorAssistantText.includes('name') &&
+    (priorAssistantText.includes('your name') ||
+      priorAssistantText.includes('what is') ||
+      priorAssistantText.includes("what's") ||
+      priorAssistantText.includes('may i have'))
+
+  if (!effectiveContactName || effectiveContactName === 'there') {
+    const nameMatch = userText.match(/(?:my name is|i am|i'm|this is)\s+([a-zA-Z\s'-]{2,40})/i)
+    let nameVal = nameMatch ? nameMatch[1].trim() : null
+    if (
+      !nameVal &&
+      askedForName &&
+      userText.length >= 2 &&
+      userText.length <= 40 &&
+      !userText.includes('\n') &&
+      /^[a-zA-Z\s'-]+$/.test(userText)
+    ) {
+      nameVal = userText.trim()
+    }
+    if (nameVal) {
+      state.informationCollected['name'] = nameVal
+      effectiveContactName = nameVal
+      void Promise.resolve(
+        db
+          .from('contacts')
+          .update({ name: nameVal, updated_at: new Date().toISOString() })
+          .eq('id', contactId)
+      ).catch((err: unknown) => console.warn('[flow-manager] failed to update contact name:', err))
+    }
+  }
+
   // 2. Immediate Intent Gate: Opt-Out (STOP, UNSUBSCRIBE, etc.)
   if (OPT_OUT_REGEX.test(lowerUserText)) {
     state.currentStage = 'OPT_OUT'
@@ -218,6 +298,13 @@ export async function processConversationFlow(
       .eq('id', conversationId)
 
     await persistFlowState(db, qualificationRecord.id, state, 'HUMAN_HANDOFF')
+
+    void dispatchAiOutcomeEvent(db, {
+      type: 'customer_opted_out',
+      accountId,
+      contactId,
+      conversationId,
+    }).catch((err) => console.warn('[flow-manager] dispatch customer_opted_out error:', err))
 
     const reply =
       'You have been unsubscribed and our automated messages have been paused. You will not receive further automated messages from us. If you ever wish to reconnect with us, simply message us anytime. Have a great day!'
@@ -236,6 +323,14 @@ export async function processConversationFlow(
     state.status = 'handed_off'
 
     await persistFlowState(db, qualificationRecord.id, state, 'HUMAN_HANDOFF')
+
+    void dispatchAiOutcomeEvent(db, {
+      type: 'conversation_handed_off',
+      accountId,
+      contactId,
+      conversationId,
+      data: { handoffReason: 'Customer requested human assistance' },
+    }).catch((err) => console.warn('[flow-manager] dispatch conversation_handed_off error:', err))
 
     const handoffText = renderTemplate(
       getEffectiveTemplate(templates, 'human_handoff'),
@@ -498,6 +593,17 @@ export async function processConversationFlow(
 
     await persistFlowState(db, qualificationRecord.id, state, 'LEAD_QUALIFIED')
 
+    void dispatchAiOutcomeEvent(db, {
+      type: 'lead_qualified',
+      accountId,
+      contactId,
+      conversationId,
+      data: {
+        serviceName: state.selectedServiceName ?? undefined,
+        leadSummary: buildLeadSummary(state, profile),
+      },
+    }).catch((err) => console.warn('[flow-manager] dispatch lead_qualified error:', err))
+
     return {
       text: pricingReply,
       handoff: false,
@@ -539,12 +645,32 @@ export async function processConversationFlow(
     }
   }
 
+  // 8B. Work email acknowledgement & transition to service presentation
+  const isAnsweringEmail = Boolean(emailMatch || (askedForEmail && userText.includes('@')))
+  if (isAnsweringEmail && !state.selectedService) {
+    state.currentStage = 'STAGE_A_UNDERSTAND'
+    const serviceList = profile.services.map((s, i) => `${i + 1}. ${s.name}`).join('\n')
+    const emailDisplay = extractedEmail || (emailMatch ? emailMatch[0].trim() : userText.trim())
+    const greeting = effectiveContactName ? `Thanks ${effectiveContactName}!` : 'Thank you!'
+    const text = `${greeting} I've noted your work email (${emailDisplay}). Which of our core services would make the biggest difference for your business right now?\n\n${serviceList}\n\nOr let me know if you would like to explore pricing or schedule a call!`
+
+    await persistFlowState(db, qualificationRecord.id, state, 'REQUIREMENT_DISCOVERY')
+
+    return {
+      text,
+      handoff: false,
+      state,
+      leadSummary: buildLeadSummary(state, profile),
+    }
+  }
+
   // 9. Natural Language Discovery within Stage A (Understand Customer)
   // Limit discovery questions to maxDiscoveryQuestions (default 2)
   if (state.discoveryQuestionsAsked >= (flowConfig.maxDiscoveryQuestions || 2)) {
     // Discovery limit reached — present services menu instead of asking another open discovery question!
     const serviceList = profile.services.map((s, i) => `${i + 1}. ${s.name}`).join('\n')
-    const text = `Thanks for sharing those details! We can certainly help. Which of our core services would make the biggest difference for you right now?\n\n${serviceList}\n\nOr let me know if you would like to explore pricing or schedule a call!`
+    const greeting = effectiveContactName ? `Thanks for sharing those details, ${effectiveContactName}!` : 'Thanks for sharing those details!'
+    const text = `${greeting} We can certainly help. Which of our core services would make the biggest difference for you right now?\n\n${serviceList}\n\nOr let me know if you would like to explore pricing or schedule a call!`
 
     state.currentStage = 'STAGE_A_UNDERSTAND'
     await persistFlowState(db, qualificationRecord.id, state, 'REQUIREMENT_DISCOVERY')
@@ -562,7 +688,7 @@ export async function processConversationFlow(
     profile,
     flowConfig,
     state,
-    contactName,
+    contactName: effectiveContactName,
     basePrompt: config.systemPrompt,
   })
 
@@ -649,6 +775,21 @@ async function executeCalendarBooking(args: {
     state.pendingBooking.selectedSlot = chosenSlot.startTime
 
     await persistFlowState(db, qualificationId, state, 'MEETING_BOOKED', undefined, bookingRes.meeting_id)
+
+    void dispatchAiOutcomeEvent(db, {
+      type: 'meeting_booked',
+      accountId,
+      contactId,
+      conversationId,
+      idempotencyKey,
+      data: {
+        meetingId: bookingRes.meeting_id,
+        serviceName: state.selectedServiceName ?? undefined,
+        leadSummary: leadSummaryText,
+        contactName: contactName || undefined,
+        budget: state.informationCollected['budget'] || state.informationCollected['price_expectation'],
+      },
+    }).catch((err) => console.warn('[flow-manager] dispatch meeting_booked error:', err))
 
     const confirmationText = renderTemplate(
       getEffectiveTemplate(templates, 'booking_confirmation'),

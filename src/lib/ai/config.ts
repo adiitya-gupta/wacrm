@@ -5,6 +5,7 @@ import type {
   AiBusinessProfile,
   AiConversationFlowConfig,
   AiMessageTemplates,
+  ConversationMode,
 } from './types'
 
 interface AiConfigRow {
@@ -29,9 +30,9 @@ const CONFIG_COLUMNS =
 export async function loadAiConfig(
   db: SupabaseClient,
   accountId: string,
-  opts: { requireActive?: boolean } = {},
+  opts: { requireActive?: boolean; requireDecryptedKey?: boolean } = {},
 ): Promise<AiConfig | null> {
-  const { requireActive = true } = opts
+  const { requireActive = true, requireDecryptedKey = true } = opts
 
   let data: AiConfigRow | null = null
   let error: { code?: string; message?: string } | null = null
@@ -43,7 +44,7 @@ export async function loadAiConfig(
     .eq('account_id', accountId)
     .maybeSingle()
 
-  if (primaryRes.error && (primaryRes.error.code === '42703' || primaryRes.error.message?.includes('column'))) {
+  if (primaryRes.error && (primaryRes.error.code === '42703' || primaryRes.error.code === 'PGRST100' || primaryRes.error.message?.includes('column'))) {
     // Backward-compatible fallback if migration 053 hasn't run yet
     const fallbackRes = await db
       .from('ai_configs')
@@ -86,7 +87,7 @@ export async function loadAiConfig(
     }
   }
 
-  let apiKey: string
+  let apiKey: string = ''
   try {
     apiKey = decrypt(row.api_key)
   } catch (err) {
@@ -94,8 +95,16 @@ export async function loadAiConfig(
       `[ai config] API key for account ${accountId} could not be decrypted — check ENCRYPTION_KEY or re-enter key in AI Settings:`,
       err instanceof Error ? err.message : err,
     )
-    throw err
+    if (requireDecryptedKey) {
+      throw err
+    }
   }
+
+  const rawFlow = row.conversation_flow as (AiConversationFlowConfig & { conversation_mode?: ConversationMode; conversationMode?: ConversationMode }) | null
+  const conversationMode: ConversationMode =
+    rawFlow?.conversationMode ??
+    rawFlow?.conversation_mode ??
+    (row.is_active && row.auto_reply_enabled ? 'ai_agent' : 'flow_first')
 
   return {
     provider: row.provider,
@@ -111,7 +120,20 @@ export async function loadAiConfig(
     businessProfile: row.business_profile ?? null,
     conversationFlow: row.conversation_flow ?? null,
     messageTemplates: row.message_templates ?? null,
+    conversationMode,
   }
+}
+
+/**
+ * Determine the effective conversation mode for an account.
+ * Default is 'ai_agent' when AI is configured and auto-reply is active.
+ */
+export function resolveConversationMode(config: AiConfig | null): ConversationMode {
+  if (!config) return 'flow_first'
+  if (config.conversationMode) return config.conversationMode
+  if (config.conversationFlow?.conversationMode) return config.conversationFlow.conversationMode
+  if (config.conversationFlow?.conversation_mode) return config.conversationFlow.conversation_mode
+  return config.isActive && config.autoReplyEnabled ? 'ai_agent' : 'flow_first'
 }
 
 /**

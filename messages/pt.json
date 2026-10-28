@@ -2316,6 +2316,7 @@
       "askName": "Qual é o seu nome?",
       "askEmail": "Obrigado, {name}! Qual é o seu e-mail profissional?",
       "askCompany": "Quase lá — qual é o nome da sua empresa?",
+      "handoffMessage": "Obrigado, {name}! Nossa equipe recebeu suas informações e entrará em contato em breve.",
       "handoffNote": "Novo lead — nome={name}, e-mail={email}, empresa={company}."
     }
   },

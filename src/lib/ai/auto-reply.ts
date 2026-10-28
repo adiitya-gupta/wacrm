@@ -7,7 +7,7 @@ import { buildSystemPrompt } from './defaults'
 import { buildHandoffSummary } from './handoff'
 import { logAiUsage } from './usage'
 import { latestUserMessage } from './query'
-import type { AiUsage } from './types'
+import type { AiUsage, ConversationMode } from './types'
 import {
   engineSendText,
   loadAccountMetaCredentials,
@@ -29,6 +29,14 @@ interface DispatchArgs {
    *  a typing indicator (which also marks it read) is shown while the
    *  reply is generated. Optional so older callers keep working. */
   inboundMessageId?: string
+  /**
+   * Whether a prior automation step has already generated a customer-facing
+   * reply for this inbound message. When true, AI stands down to prevent
+   * double-replying.
+   */
+  automationReplied?: boolean
+  /** Account-level conversation mode */
+  conversationMode?: ConversationMode
 }
 
 /**
@@ -41,6 +49,7 @@ interface DispatchArgs {
  *
  * Eligibility gates (any → silent no-op):
  *   - AI off / auto-reply disabled for the account
+ *   - an automation already replied to this message
  *   - a human agent is assigned (they own the thread)
  *   - auto-reply was disabled for this conversation (prior handoff)
  *   - the per-conversation reply cap is reached
@@ -49,6 +58,7 @@ interface DispatchArgs {
  * The 24h WhatsApp session window is inherently open here — we're
  * reacting to a customer message that just landed — so no separate
  * window check is needed.
+ */
 /**
  * Check whether the given account is the official OPSIYS account.
  * The consultative OPSIYS sales persona and agency pitch run ONLY for the
@@ -71,6 +81,8 @@ export async function dispatchInboundToAiReply(
     contactId,
     configOwnerUserId,
     inboundMessageId,
+    automationReplied,
+    conversationMode: callerMode,
   } = args
 
   try {
@@ -82,24 +94,47 @@ export async function dispatchInboundToAiReply(
       return
     }
 
-    // Deterministic, user-configured responders win over the LLM — the
-    // caller already excludes messages a Flow consumed. Message-level
-    // automations (`new_message_received` / `keyword_match`) are
-    // dispatched independently for this same inbound and may send their
-    // own reply, so if the account has any active one we stand down to
-    // avoid double-texting the customer. (Relationship triggers like
-    // `first_inbound_message` don't count — they're not per-message
-    // auto-responders.)
-    const { data: autoResponders } = await db
-      .from('automations')
-      .select('id')
-      .eq('account_id', accountId)
-      .eq('is_active', true)
-      .in('trigger_type', ['new_message_received', 'keyword_match'])
-      .limit(1)
-    if (autoResponders && autoResponders.length > 0) {
-      console.info(`[ai auto-reply] skipping: account ${accountId} has ${autoResponders.length} active message-level automation(s)`)
+    if (automationReplied) {
+      console.info(`[ai auto-reply] skipping: message was already answered by an automation`)
       return
+    }
+
+    // In automation_first mode, active conversational automations take priority.
+    // In ai_agent mode, the AI Agent owns the conversation by default and does not stand down
+    // for non-conflicting automations.
+    const effectiveMode = callerMode ?? config.conversationMode ?? 'ai_agent'
+    if (effectiveMode === 'automation_first') {
+      const { data: autoResponders } = await db
+        .from('automations')
+        .select('id, trigger_type, trigger_config')
+        .eq('account_id', accountId)
+        .eq('is_active', true)
+        .in('trigger_type', ['new_message_received', 'keyword_match'])
+
+      if (autoResponders && autoResponders.length > 0) {
+        const hasCatchAll = autoResponders.some(
+          (a) => a.trigger_type === 'new_message_received' || !a.trigger_type,
+        )
+        if (hasCatchAll) {
+          console.info(`[ai auto-reply] skipping: account ${accountId} has active new_message_received automation in automation_first mode`)
+          return
+        }
+
+        // Check if any keyword automation matches the latest user turn
+        const preContext = await buildConversationContext(db, conversationId)
+        const userText = (latestUserMessage(preContext) || '').toLowerCase()
+        const matchesKeyword = autoResponders.some((a) => {
+          if (a.trigger_type !== 'keyword_match') return false
+          const cfg = a.trigger_config as { keywords?: string[] } | undefined
+          if (!cfg?.keywords || cfg.keywords.length === 0) return true
+          return cfg.keywords.some((k) => userText.includes(k.toLowerCase()))
+        })
+
+        if (matchesKeyword) {
+          console.info(`[ai auto-reply] skipping: incoming message matched active keyword automation in automation_first mode`)
+          return
+        }
+      }
     }
 
     const { data: conv, error: convErr } = await db
@@ -265,6 +300,22 @@ export async function dispatchInboundToAiReply(
         update.assigned_agent_id = config.handoffAgentId
       }
       await db.from('conversations').update(update).eq('id', conversationId)
+
+      // Send the parting/handoff message if one was generated (e.g. opt-out confirmation or handoff notice)
+      if (text && text.trim()) {
+        try {
+          await engineSendText({
+            accountId,
+            userId: configOwnerUserId,
+            conversationId,
+            contactId,
+            text,
+            aiGenerated: true,
+          })
+        } catch (sendErr) {
+          console.warn('[ai auto-reply] failed to send handoff message:', sendErr)
+        }
+      }
       return
     }
 

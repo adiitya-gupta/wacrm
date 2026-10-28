@@ -11,6 +11,10 @@ export const WEBHOOK_EVENTS = [
   'message.received', // an inbound WhatsApp message landed
   'message.status_updated', // a sent message advanced (sent/delivered/read)
   'conversation.created', // a new conversation was opened for a contact
+  'ai.lead_qualified', // a lead completed qualification questions with AI
+  'ai.meeting_booked', // a meeting/appointment was booked via AI
+  'ai.conversation_handed_off', // conversation was handed off to a human agent
+  'ai.customer_opted_out', // contact requested opt-out / stopped automation
 ] as const;
 
 export type WebhookEvent = (typeof WEBHOOK_EVENTS)[number];
@@ -21,6 +25,10 @@ export const WEBHOOK_EVENT_DESCRIPTIONS: Record<WebhookEvent, string> = {
   'message.status_updated':
     'A message you sent changed delivery status (sent/delivered/read/failed)',
   'conversation.created': 'A new conversation was opened',
+  'ai.lead_qualified': 'A lead was successfully qualified by the AI Agent',
+  'ai.meeting_booked': 'A meeting or consultation was scheduled by the AI Agent',
+  'ai.conversation_handed_off': 'A conversation was escalated or handed off to a human agent',
+  'ai.customer_opted_out': 'A customer requested to opt out of automated messaging',
 };
 
 /** Type-narrow an unknown value into a valid `WebhookEvent`. */

@@ -23,6 +23,8 @@ export type FallbackAction =
   | { type: "handoff" }
   /** End the run with status='completed' (the `end` exhaust option). */
   | { type: "end" }
+  /** Hand off directly to the AI Agent conversational brain. */
+  | { type: "delegate_ai" }
   /** Do nothing — the message wasn't for us. */
   | { type: "ignore" };
 
@@ -41,7 +43,8 @@ export function resolveFallbackPolicy(
     on_unknown_reply:
       r.on_unknown_reply === "handoff" ||
       r.on_unknown_reply === "ignore" ||
-      r.on_unknown_reply === "reprompt"
+      r.on_unknown_reply === "reprompt" ||
+      r.on_unknown_reply === "delegate_ai"
         ? r.on_unknown_reply
         : DEFAULT_FALLBACK_POLICY.on_unknown_reply,
     max_reprompts:
@@ -53,7 +56,9 @@ export function resolveFallbackPolicy(
         ? r.on_timeout_hours
         : DEFAULT_FALLBACK_POLICY.on_timeout_hours,
     on_exhaust:
-      r.on_exhaust === "handoff" || r.on_exhaust === "end"
+      r.on_exhaust === "handoff" ||
+      r.on_exhaust === "end" ||
+      r.on_exhaust === "delegate_ai"
         ? r.on_exhaust
         : DEFAULT_FALLBACK_POLICY.on_exhaust,
   };
@@ -68,6 +73,7 @@ export function resolveFallbackPolicy(
  *   that should keep running even if the customer types something
  *   off-script in between taps (rare; default is reprompt).
  * - `on_unknown_reply: 'handoff'` → immediately escalate. No retries.
+ * - `on_unknown_reply: 'delegate_ai'` → immediately hand off to AI Agent.
  * - `on_unknown_reply: 'reprompt'` → re-send the prompt up to
  *   `max_reprompts` times, then apply `on_exhaust`.
  */
@@ -80,10 +86,14 @@ export function decideFallback(args: {
 
   if (policy.on_unknown_reply === "ignore") return { type: "ignore" };
   if (policy.on_unknown_reply === "handoff") return { type: "handoff" };
+  if (policy.on_unknown_reply === "delegate_ai") return { type: "delegate_ai" };
 
   // 'reprompt' — guarded by max_reprompts.
   if (reprompt_count <= policy.max_reprompts) {
     return { type: "reprompt" };
+  }
+  if (policy.on_exhaust === "delegate_ai") {
+    return { type: "delegate_ai" };
   }
   return policy.on_exhaust === "end"
     ? { type: "end" }

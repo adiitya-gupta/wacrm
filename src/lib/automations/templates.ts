@@ -123,7 +123,7 @@ export const AUTOMATION_TEMPLATES: Record<TemplateSlug, AutomationTemplateDefini
     steps: [
       {
         step_type: 'wait',
-        step_config: { amount: 1, unit: 'days' },
+        step_config: { amount: 23, unit: 'hours' },
       },
       {
         step_type: 'send_message',

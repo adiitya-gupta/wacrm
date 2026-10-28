@@ -999,6 +999,7 @@
         "add_tag": "Adicionar tag",
         "remove_tag": "Remover tag",
         "assign_conversation": "Atribuir conversa",
+        "handover_to_ai": "Transferir para o agente de IA",
         "update_contact_field": "Atualizar campo do contato",
         "create_deal": "Criar negócio",
         "wait": "Aguardar",
@@ -1153,7 +1154,10 @@
         "matchExact": "Exata",
         "waitForReply": "Aguardar resposta antes de continuar",
         "waitForReplyHint": "Pausa aqui até o cliente tocar em um botão ou responder (até 24h). As etapas seguintes, incluindo Se/Senão no conteúdo da mensagem, usam essa resposta.",
-        "closeConversationHint": "Define o status da conversa como \"fechada\". Nenhuma configuração necessária."
+        "closeConversationHint": "Define o status da conversa como \"fechada\". Nenhuma configuração necessária.",
+        "handoverToAiHint": "Transfere a propriedade da conversa para o Agente de IA e continua a conversa usando as instruções e etapas configuradas.",
+        "instructionLabel": "Instruções de transferência / Contexto (Opcional)",
+        "placeholderHandoverInstruction": "ex: Lead chegado via anúncio do WhatsApp, qualificar para plano enterprise"
       },
       "preview": {
         "noText": "sem texto ainda",
@@ -1167,7 +1171,8 @@
           "days": "dias"
         },
         "when": "quando {subject}",
-        "noUrl": "sem URL"
+        "noUrl": "sem URL",
+        "handoverToAi": "Transferir para o agente de IA"
       }
     }
   },

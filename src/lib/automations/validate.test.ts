@@ -24,9 +24,23 @@ describe("validateStepsForActivation", () => {
         step_config: { amount: 5, unit: "minutes" },
       },
       { step_type: "add_tag", step_config: { tag_id: "tag-uuid" } },
+      { step_type: "handover_to_ai", step_config: { instruction: "Help qualifying the lead" } },
       { step_type: "close_conversation", step_config: {} },
     ]);
     expect(issues).toEqual([]);
+  });
+
+  it("passes handover_to_ai with empty or undefined instruction", () => {
+    expect(
+      validateStepsForActivation([
+        { step_type: "handover_to_ai", step_config: {} },
+      ]),
+    ).toEqual([]);
+    expect(
+      validateStepsForActivation([
+        { step_type: "handover_to_ai", step_config: { instruction: "" } },
+      ]),
+    ).toEqual([]);
   });
 
   it("flags every required field that is missing", () => {

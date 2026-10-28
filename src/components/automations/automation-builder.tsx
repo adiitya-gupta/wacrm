@@ -33,6 +33,7 @@ import {
   ArrowUp,
   MousePointerClick,
   List,
+  Bot,
 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
@@ -114,6 +115,7 @@ const STEP_META: Record<AutomationStepType, StepMeta> = {
   add_tag: { label: "add_tag", icon: Tag, border: "border-l-primary" },
   remove_tag: { label: "remove_tag", icon: TagIcon, border: "border-l-primary" },
   assign_conversation: { label: "assign_conversation", icon: UserCheck, border: "border-l-primary" },
+  handover_to_ai: { label: "handover_to_ai", icon: Bot, border: "border-l-primary" },
   update_contact_field: { label: "update_contact_field", icon: PencilLine, border: "border-l-primary" },
   create_deal: { label: "create_deal", icon: Briefcase, border: "border-l-primary" },
   wait: { label: "wait", icon: Hourglass, border: "border-l-border" },
@@ -130,6 +132,7 @@ const ADDABLE_STEPS: AutomationStepType[] = [
   "add_tag",
   "remove_tag",
   "assign_conversation",
+  "handover_to_ai",
   "update_contact_field",
   "create_deal",
   "wait",
@@ -197,6 +200,8 @@ function blankConfig(type: AutomationStepType): Record<string, unknown> {
       return { url: "", headers: {}, body_template: "" }
     case "close_conversation":
       return {}
+    case "handover_to_ai":
+      return { instruction: "" }
     default:
       return {}
   }
@@ -1533,6 +1538,27 @@ function StepEditor({
           {t("config.closeConversationHint", { defaultValue: "Sets the conversation status to \"closed\". No configuration needed." })}
         </p>
       )
+    case "handover_to_ai":
+      return (
+        <div className="space-y-3">
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            {t("config.handoverToAiHint", {
+              defaultValue:
+                "Transfers conversational ownership to the AI Agent and continues the conversation using the configured AI Agent instructions and stages.",
+            })}
+          </p>
+          <FieldBlock label={t("config.instructionLabel", { defaultValue: "Handover Instructions / Context (Optional)" })}>
+            <Input
+              value={(cfg.instruction as string) ?? ""}
+              onChange={(e) => set({ instruction: e.target.value })}
+              placeholder={t("config.placeholderHandoverInstruction", {
+                defaultValue: "e.g. Lead arrived via WhatsApp ad, qualify for enterprise tier",
+              })}
+              className="bg-muted text-foreground"
+            />
+          </FieldBlock>
+        </div>
+      )
     default:
       return null
   }
@@ -1585,6 +1611,8 @@ function previewFor(
       return t("preview.when", { subject: String(step.step_config.subject ?? "?") })
     case "send_webhook":
       return (step.step_config.url as string) || t("preview.noUrl")
+    case "handover_to_ai":
+      return (step.step_config.instruction as string) || t("preview.handoverToAi", { defaultValue: "Handover to AI Agent" })
     default:
       return ""
   }

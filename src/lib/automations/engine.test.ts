@@ -3,6 +3,8 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 // Shared mock state for the service-role client. Lives in a hoisted block
 // so the vi.mock factory below can close over it.
 const h = vi.hoisted(() => ({
+  dispatchInboundToAiReply: vi.fn(async () => {}),
+  loadAiConfig: vi.fn(async (): Promise<any> => null),
   state: {
     owned: null as { id: string } | null,
     ownedCustomField: null as { id: string } | null,
@@ -19,6 +21,14 @@ const h = vi.hoisted(() => ({
     pending: [] as Record<string, unknown>[],
     pendingUpdateError: null as { message: string } | null,
   },
+}));
+
+vi.mock("@/lib/ai/auto-reply", () => ({
+  dispatchInboundToAiReply: h.dispatchInboundToAiReply,
+}));
+
+vi.mock("@/lib/ai/config", () => ({
+  loadAiConfig: h.loadAiConfig,
 }));
 
 vi.mock("./admin-client", () => {
@@ -1015,5 +1025,161 @@ describe("wait_for_reply", () => {
     expect(expired).toBe(1);
     expect(h.state.pending[0].status).toBe("expired");
     expect(h.state.logUpdates.at(-1)).toEqual({ error_message: "no reply within 24h" });
+  });
+});
+
+describe("handover_to_ai action", () => {
+  const autoId = "auto-handover";
+  const contactId = "contact-1";
+  const convId = "conv-1";
+
+  beforeEach(() => {
+    h.state.owned = { id: contactId };
+    h.state.ownedConversation = { id: convId };
+    h.loadAiConfig.mockResolvedValue({
+      isActive: true,
+      autoReplyEnabled: true,
+      autoReplyMaxPerConversation: 10,
+      businessProfile: {
+        businessName: "OPSIYS",
+        services: [
+          { id: "ai_automation", name: "AI & Automation", description: "AI solutions" },
+          { id: "custom_dev", name: "Custom Development", description: "Development" },
+        ],
+      },
+      conversationFlow: {
+        preset: "service_to_conversion",
+      },
+    });
+  });
+
+  it("parks for reply when interactive buttons precede handover and customer has not replied yet", async () => {
+    h.state.automations = [
+      {
+        id: autoId,
+        account_id: ACCOUNT,
+        user_id: "user-1",
+        is_active: true,
+        trigger_type: "keyword_match",
+        trigger_config: { keywords: ["hi", "hello"], match_type: "contains" },
+      },
+    ];
+    h.state.steps = [
+      {
+        id: "s1",
+        automation_id: autoId,
+        position: 0,
+        parent_step_id: null,
+        branch: null,
+        step_type: "send_buttons",
+        step_config: {
+          kind: "buttons",
+          body: "Welcome! Choose a service:",
+          buttons: [
+            { id: "ai_automation", title: "AI & Automation" },
+            { id: "custom_dev", title: "Custom Dev" },
+          ],
+        },
+      },
+      {
+        id: "s2",
+        automation_id: autoId,
+        position: 1,
+        parent_step_id: null,
+        branch: null,
+        step_type: "handover_to_ai",
+        step_config: { instruction: "Guide through qualified options" },
+      },
+    ];
+
+    await runAutomationsForTrigger({
+      accountId: ACCOUNT,
+      triggerType: "keyword_match",
+      contactId,
+      context: { message_text: "hi", conversation_id: convId },
+    });
+
+    // Verify interactive buttons were sent
+    expect(engineSendInteractive).toHaveBeenCalled();
+
+    // Verify execution parked at handover_to_ai with status awaiting_reply
+    expect(h.state.pending).toHaveLength(1);
+    expect(h.state.pending[0].status).toBe("awaiting_reply");
+    expect(h.state.pending[0].next_step_position).toBe(1);
+
+    // AI auto reply was not triggered prematurely before customer button selection
+    expect(h.dispatchInboundToAiReply).not.toHaveBeenCalled();
+  });
+
+  it("resumes on customer button reply, sets ownership and dispatches AI reply with service context", async () => {
+    h.state.automations = [
+      {
+        id: autoId,
+        account_id: ACCOUNT,
+        user_id: "user-1",
+        is_active: true,
+        trigger_type: "keyword_match",
+        trigger_config: { keywords: ["hi", "hello"], match_type: "contains" },
+      },
+    ];
+    h.state.steps = [
+      {
+        id: "s1",
+        automation_id: autoId,
+        position: 0,
+        parent_step_id: null,
+        branch: null,
+        step_type: "send_buttons",
+        step_config: {
+          kind: "buttons",
+          body: "Welcome! Choose a service:",
+          buttons: [
+            { id: "ai_automation", title: "AI & Automation" },
+            { id: "custom_dev", title: "Custom Dev" },
+          ],
+        },
+      },
+      {
+        id: "s2",
+        automation_id: autoId,
+        position: 1,
+        parent_step_id: null,
+        branch: null,
+        step_type: "handover_to_ai",
+        step_config: { instruction: "Guide through qualified options" },
+      },
+    ];
+
+    // Customer triggered welcome automation
+    await runAutomationsForTrigger({
+      accountId: ACCOUNT,
+      triggerType: "keyword_match",
+      contactId,
+      context: { message_text: "hi", conversation_id: convId },
+    });
+    expect(h.state.pending).toHaveLength(1);
+
+    // Now customer taps the button
+    const consumed = await resumeAwaitingReply({
+      accountId: ACCOUNT,
+      contactId,
+      context: {
+        message_text: "AI & Automation",
+        conversation_id: convId,
+        interactive_reply_id: "ai_automation",
+      },
+    });
+
+    expect(consumed).toBe(true);
+
+    // Verify AI auto reply was dispatched with forceAiReply: true
+    expect(h.dispatchInboundToAiReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        accountId: ACCOUNT,
+        conversationId: convId,
+        contactId,
+        forceAiReply: true,
+      }),
+    );
   });
 });

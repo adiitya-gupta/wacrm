@@ -389,4 +389,128 @@ describe('AI Config Persistence & Reload Route', () => {
     expect(res.status).toBe(400)
     expect(data.error).toContain('Unsupported template variable')
   })
+
+  it('saves and completely reloads all 6 AI configuration sections across sessions and reloads', async () => {
+    const fullConfigPayload = {
+      provider: 'openai',
+      model: 'gpt-4o-mini',
+      system_prompt: 'You are Wattomation AI assistant.',
+      is_active: false,
+      auto_reply_enabled: false,
+      auto_reply_max_per_conversation: 5,
+      // 1. Business Profile (with services, custom instructions, prohibited claims)
+      // 4. Pricing & Booking (pricingPackages, pricingRules)
+      // 5. Tone & Language (tone, responseLength, primaryLanguage)
+      business_profile: {
+        businessName: 'Wattomation Enterprise',
+        industry: 'SaaS & Automation',
+        businessDescription: 'Intelligent WhatsApp CRM & Automation',
+        services: [
+          {
+            id: 'srv-1',
+            name: 'AI & Automation',
+            description: 'Agentic workflows and automated routing',
+            benefits: ['24/7 instant replies', 'Zero missed leads'],
+          },
+        ],
+        customInstructions: 'Always be concise and cite official SLAs.',
+        prohibitedClaims: ['Never promise 100% discount', 'Never guarantee zero bugs'],
+        pricingPackages: [
+          {
+            id: 'pkg-1',
+            name: 'Growth',
+            price: '$199/mo',
+            billingPeriod: 'monthly',
+            description: 'For scaling support teams',
+            features: ['10,000 messages', '3 AI agents'],
+          },
+        ],
+        pricingRules: [
+          {
+            id: 'rule-1',
+            title: 'Custom Scoping Rule',
+            rule: 'Exact pricing is tailored on our discovery call based on volume.',
+          },
+        ],
+        tone: 'consultative',
+        responseLength: 'concise',
+        primaryLanguage: 'en',
+      },
+      // 2. Flows & Stages
+      conversation_flow: {
+        preset: 'service_to_conversion',
+        conversationMode: 'ai_agent',
+        maxDiscoveryQuestions: 2,
+        stages: [
+          { id: 'greeting', name: 'Greeting', goal: 'Welcome customer' },
+          { id: 'discovery', name: 'Discovery', goal: 'Collect requirements' },
+          { id: 'pricing', name: 'Pricing', goal: 'Present pricing' },
+        ],
+        qualificationCriteria: ['Has active WhatsApp Business account', 'Budget > $1k'],
+      },
+      // 3. Message Templates
+      message_templates: {
+        welcome: 'Welcome to {{business_name}}! How can we assist you today?',
+        qualificationComplete: 'Thank you for sharing your requirements. We will prepare your plan.',
+        consultationInvite: 'Would you like to schedule a quick call with our specialists?',
+      },
+    }
+
+    // Step 1: POST the 6 sections
+    const postReq = new Request('http://localhost/api/ai/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(fullConfigPayload),
+    })
+
+    const postRes = await POST(postReq)
+    const postData = await postRes.json()
+    expect(postRes.status).toBe(200)
+    expect(postData.success).toBe(true)
+
+    // Step 2: Fresh GET request (simulating page reload, fresh session, or new browser tab)
+    const getRes = await GET()
+    const getData = await getRes.json()
+    expect(getRes.status).toBe(200)
+
+    // Verify Business Profile
+    expect(getData.business_profile).toMatchObject({
+      businessName: 'Wattomation Enterprise',
+      industry: 'SaaS & Automation',
+      businessDescription: 'Intelligent WhatsApp CRM & Automation',
+      customInstructions: 'Always be concise and cite official SLAs.',
+      prohibitedClaims: ['Never promise 100% discount', 'Never guarantee zero bugs'],
+      tone: 'consultative',
+      responseLength: 'concise',
+      primaryLanguage: 'en',
+    })
+    expect(getData.business_profile.services).toHaveLength(1)
+    expect(getData.business_profile.services[0].name).toBe('AI & Automation')
+
+    // Verify Pricing & Booking
+    expect(getData.business_profile.pricingPackages).toHaveLength(1)
+    expect(getData.business_profile.pricingPackages[0].name).toBe('Growth')
+    expect(getData.business_profile.pricingRules).toHaveLength(1)
+    expect(getData.business_profile.pricingRules[0].title).toBe('Custom Scoping Rule')
+
+    // Verify Flows & Stages
+    expect(getData.conversation_flow).toMatchObject({
+      preset: 'service_to_conversion',
+      conversationMode: 'ai_agent',
+      maxDiscoveryQuestions: 2,
+    })
+    expect(getData.conversation_flow.stages).toHaveLength(3)
+    expect(getData.conversation_flow.qualificationCriteria).toEqual([
+      'Has active WhatsApp Business account',
+      'Budget > $1k',
+    ])
+
+    // Verify Message Templates
+    expect(getData.message_templates).toMatchObject({
+      welcome: 'Welcome to {{business_name}}! How can we assist you today?',
+      qualificationComplete: 'Thank you for sharing your requirements. We will prepare your plan.',
+      consultationInvite: 'Would you like to schedule a quick call with our specialists?',
+    })
+  })
 })
+

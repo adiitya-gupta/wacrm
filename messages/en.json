@@ -999,6 +999,7 @@
         "add_tag": "Add Tag",
         "remove_tag": "Remove Tag",
         "assign_conversation": "Assign Conversation",
+        "handover_to_ai": "Handover to AI Agent",
         "update_contact_field": "Update Contact Field",
         "create_deal": "Create Deal",
         "wait": "Wait",
@@ -1153,7 +1154,10 @@
         "matchExact": "Exact",
         "waitForReply": "Wait for reply before continuing",
         "waitForReplyHint": "Pauses here until the customer taps a button or replies (up to 24h). The steps after this one, including If/Else on message content, then use their reply.",
-        "closeConversationHint": "Sets the conversation status to \"closed\". No configuration needed."
+        "closeConversationHint": "Sets the conversation status to \"closed\". No configuration needed.",
+        "handoverToAiHint": "Transfers conversational ownership to the AI Agent and continues the conversation using the configured AI Agent instructions and stages.",
+        "instructionLabel": "Handover Instructions / Context (Optional)",
+        "placeholderHandoverInstruction": "e.g. Lead arrived via WhatsApp ad, qualify for enterprise tier"
       },
       "preview": {
         "noText": "no text yet",
@@ -1167,7 +1171,8 @@
           "days": "days"
         },
         "when": "when {subject}",
-        "noUrl": "no url"
+        "noUrl": "no url",
+        "handoverToAi": "Handover to AI Agent"
       }
     }
   },

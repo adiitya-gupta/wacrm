@@ -58,6 +58,7 @@ let currentAiConfig: {
 }
 
 let mockUpsertReturn: unknown[] = [{ id: 'msg-inserted-1' }]
+let currentConversationRow: Record<string, unknown> = { id: 'conv-1', account_id: 'tenant-1-account', status: 'open' }
 const capturedUpserts: Array<{ table: string; payload: Record<string, unknown>; onConflict?: string; ignoreDuplicates?: boolean }> = []
 
 vi.mock('@supabase/supabase-js', () => ({
@@ -199,18 +200,18 @@ vi.mock('@supabase/supabase-js', () => ({
           order: vi.fn(() => builder),
           limit: vi.fn(() => builder),
           maybeSingle: vi.fn(async () => ({
-            data: { id: 'conv-1', account_id: 'tenant-1-account', status: 'open' },
+            data: currentConversationRow,
             error: null,
           })),
           single: vi.fn(async () => ({
-            data: { id: 'conv-1', account_id: 'tenant-1-account', status: 'open' },
+            data: currentConversationRow,
             error: null,
           })),
           update: vi.fn(() => builder),
           then: vi.fn((resolve: (res: { data: unknown; error: unknown }) => unknown) =>
             Promise.resolve(
               resolve({
-                data: [{ id: 'conv-1', account_id: 'tenant-1-account', status: 'open' }],
+                data: [currentConversationRow],
                 error: null,
               })
             )
@@ -335,6 +336,7 @@ describe('Conversation Ownership & Anti-Contradiction Engine', () => {
   beforeEach(() => {
     capturedUpserts.length = 0
     mockUpsertReturn = [{ id: 'msg-inserted-1' }]
+    currentConversationRow = { id: 'conv-1', account_id: 'tenant-1-account', status: 'open' }
     pendingAfter = null
     mockRunAutomationsForTrigger.mockReset().mockResolvedValue({
       matchedCount: 0,
@@ -673,6 +675,44 @@ describe('Conversation Ownership & Anti-Contradiction Engine', () => {
         conversationMode: 'ai_agent',
         automationReplied: false,
         inboundMessageId: 'wamid.screen-004',
+      })
+    )
+  })
+
+  it('Scenario 16: Handover to AI Agent transfers ownership and suppresses competing automations on subsequent turns', async () => {
+    currentAiConfig = {
+      is_active: true,
+      auto_reply_enabled: true,
+      conversation_flow: { conversationMode: 'automation_first' },
+    }
+
+    // Set conversation as handed over to AI Agent
+    currentConversationRow.ai_handoff_summary = 'Handed over to AI Agent: Guide through qualified options'
+
+    mockDispatchInboundToFlows.mockResolvedValueOnce({ consumed: false, outcome: 'no_match' })
+
+    // When customer messages after handover, suppressConversationalReplies must be true
+    mockRunAutomationsForTrigger.mockImplementation(async (args: { suppressConversationalReplies?: boolean }) => {
+      expect(args.suppressConversationalReplies).toBe(true)
+      return {
+        matchedCount: 1,
+        executedCount: 1,
+        repliedCount: 0,
+        tookOwnershipCount: 0,
+        backgroundOnlyCount: 1,
+      }
+    })
+
+    const res = await POST(makeWebhookRequest('I want to handle high traffic', 'wamid.traffic-001'))
+    if (pendingAfter) await pendingAfter
+    expect(res.status).toBe(200)
+
+    // AI Auto-reply is called as the conversational owner
+    expect(mockDispatchInboundToAiReply).toHaveBeenCalledTimes(1)
+    expect(mockDispatchInboundToAiReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationId: 'conv-1',
+        inboundMessageId: 'wamid.traffic-001',
       })
     )
   })

@@ -499,7 +499,8 @@ export type AutomationStepType =
   | 'wait'
   | 'condition'
   | 'send_webhook'
-  | 'close_conversation';
+  | 'close_conversation'
+  | 'handover_to_ai';
 
 export type AutomationLogStatus = 'success' | 'partial' | 'failed';
 
@@ -620,6 +621,11 @@ export interface SendWebhookStepConfig {
   body_template?: string;
 }
 
+export interface HandoverToAiStepConfig {
+  instruction?: string;
+  wait_for_reply?: boolean;
+}
+
 export type AutomationStepConfig =
   | SendMessageStepConfig
   | SendButtonsStepConfig
@@ -632,6 +638,7 @@ export type AutomationStepConfig =
   | WaitStepConfig
   | ConditionStepConfig
   | SendWebhookStepConfig
+  | HandoverToAiStepConfig
   | Record<string, never>
   | Record<string, unknown>;
 

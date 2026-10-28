@@ -17,6 +17,7 @@ import type {
   WaitStepConfig,
   CreateDealStepConfig,
   AssignConversationStepConfig,
+  HandoverToAiStepConfig,
 } from '@/types'
 import { supabaseAdmin } from './admin-client'
 import { addContactTagIfAbsent } from '@/lib/contacts/tag-write'
@@ -25,6 +26,17 @@ import { engineSendText, engineSendTemplate, engineSendInteractive } from './met
 import { validateInteractivePayload } from '@/lib/whatsapp/interactive'
 import { isDeliverableUrl } from '@/lib/webhooks/ssrf'
 import { getT } from '@/lib/i18n/translate'
+import { loadAiConfig } from '@/lib/ai/config'
+import {
+  resolveEffectiveBusinessProfile,
+  resolveEffectiveFlowConfig,
+  matchServiceFromCatalog,
+  loadOrCreateQualification,
+  deserializeFlowState,
+  persistFlowState,
+} from '@/lib/ai/flow-manager'
+import { dispatchInboundToAiReply } from '@/lib/ai/auto-reply'
+import type { ServiceItem } from '@/lib/ai/types'
 
 /** Step errors land in automation_logs and are shown on the logs page. */
 const tErr = getT('LibErrors.engine')
@@ -517,7 +529,7 @@ interface ExecuteArgs {
   startPosition: number
   logId: string | null
   triggerEvent: string
-  tracker?: { replied: boolean }
+  tracker?: { replied: boolean; interactiveSent?: boolean }
   suppressConversationalReplies?: boolean
 }
 
@@ -637,6 +649,21 @@ async function executeStepsFrom(args: ExecuteArgs): Promise<ScopeOutcome> {
         continue
       }
 
+      if (
+        step.step_type === 'handover_to_ai' &&
+        args.tracker?.interactiveSent &&
+        !args.context.interactive_reply_id
+      ) {
+        await parkForReply(step, args, step.position)
+        results.push({
+          step_id: step.id,
+          step_type: step.step_type,
+          status: 'success',
+          detail: 'interactive menu sent; waiting for customer reply before handing over to AI Agent',
+        })
+        return suspend(args, results, errorMessage)
+      }
+
       const detail = await runStep(step, args)
       if (
         step.step_type === 'send_message' ||
@@ -646,6 +673,11 @@ async function executeStepsFrom(args: ExecuteArgs): Promise<ScopeOutcome> {
       ) {
         if (args.tracker) {
           args.tracker.replied = true
+        }
+      }
+      if (step.step_type === 'send_buttons' || step.step_type === 'send_list') {
+        if (args.tracker) {
+          args.tracker.interactiveSent = true
         }
       }
       if (waitsForReply(step)) {
@@ -754,7 +786,11 @@ function waitsForReply(step: AutomationStep): boolean {
  * The newest menu wins: any other run already waiting on this contact
  * is superseded, so a reply can never resume a stale menu.
  */
-async function parkForReply(step: AutomationStep, args: ExecuteArgs): Promise<void> {
+async function parkForReply(
+  step: AutomationStep,
+  args: ExecuteArgs,
+  nextPosition?: number,
+): Promise<void> {
   if (!args.contactId) throw new Error(tErr('needsContact', { step: step.step_type }))
   const db = supabaseAdmin()
   const { error: supErr } = await db
@@ -772,7 +808,7 @@ async function parkForReply(step: AutomationStep, args: ExecuteArgs): Promise<vo
     log_id: args.logId,
     parent_step_id: args.parentStepId,
     branch: args.branch,
-    next_step_position: step.position + 1,
+    next_step_position: nextPosition ?? (step.position + 1),
     context: args.context,
     // For awaiting_reply rows run_at is the reply deadline (migration 045).
     run_at: new Date(Date.now() + REPLY_WAIT_MS).toISOString(),
@@ -1043,6 +1079,80 @@ async function runStep(step: AutomationStep, args: ExecuteArgs): Promise<string>
         .eq('account_id', args.automation.account_id)
         .eq('contact_id', args.contactId)
       return 'conversation closed'
+    }
+
+    case 'handover_to_ai': {
+      const cfg = step.step_config as HandoverToAiStepConfig
+      const conversationId = await resolveConversationId(args)
+      const contactId = args.contactId
+      if (!contactId) throw new Error(tErr('needsContact', { step: 'handover_to_ai' }))
+
+      const handoffSummary = cfg.instruction
+        ? `Handed over to AI Agent: ${cfg.instruction}`
+        : 'Handed over to AI Agent via automation'
+
+      await db
+        .from('conversations')
+        .update({
+          assigned_agent_id: null,
+          ai_autoreply_disabled: false,
+          ai_handoff_summary: handoffSummary,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', conversationId)
+        .eq('account_id', args.automation.account_id)
+
+      const aiConfig = await loadAiConfig(db, args.automation.account_id)
+      if (!aiConfig) return 'AI not configured'
+      const profile = resolveEffectiveBusinessProfile(aiConfig, args.automation.account_id)
+      const flowConfig = resolveEffectiveFlowConfig(aiConfig)
+
+      const tapId = args.context.interactive_reply_id
+      const msgText = args.context.message_text || ''
+      const selectionInput = tapId || msgText
+
+      const matched = matchServiceFromCatalog(selectionInput, profile.services)
+
+      const qual = await loadOrCreateQualification(
+        db,
+        args.automation.account_id,
+        contactId,
+        conversationId,
+      )
+      const flowState = deserializeFlowState(qual, flowConfig.preset)
+
+      if (matched) {
+        flowState.selectedService = matched.id
+        flowState.selectedServiceName = matched.name
+        if (!flowState.servicesIdentified.includes(matched.name)) {
+          flowState.servicesIdentified.push(matched.name)
+        }
+      }
+      if (cfg.instruction) {
+        flowState.informationCollected['automation_instruction'] = cfg.instruction
+      }
+
+      await persistFlowState(
+        db,
+        qual.id,
+        flowState,
+        matched ? 'LEAD_QUALIFIED' : 'REQUIREMENT_DISCOVERY',
+      )
+
+      if (selectionInput) {
+        await dispatchInboundToAiReply({
+          accountId: args.automation.account_id,
+          conversationId,
+          contactId,
+          configOwnerUserId: args.automation.user_id,
+          forceAiReply: true,
+        })
+        if (args.tracker) {
+          args.tracker.replied = true
+        }
+      }
+
+      return `handed over to AI Agent${matched ? ` (service: ${matched.name})` : ''}`
     }
 
     default:

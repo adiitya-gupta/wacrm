@@ -1017,12 +1017,14 @@ async function processMessage(
   // and never throws; the `.catch` is belt-and-braces so one trigger
   // type's failure can't skip the rest of the loop.
   // When AI Agent owns the conversation, or when a Flow consumed the message,
-  // suppress customer-facing replies from automations so they don't send competing
-  // duplicate greetings or conflicting messages. Non-conversational steps (tagging,
-  // contact updates, deals, webhooks) still execute freely.
+  const isHandedOverToAi =
+    typeof conversation?.ai_handoff_summary === 'string' &&
+    conversation.ai_handoff_summary.includes('Handed over to AI Agent')
+
   const suppressConversationalReplies =
     (conversationMode === 'ai_agent' && isAiActive) ||
-    (conversationMode === 'flow_first' && flowConsumed)
+    (conversationMode === 'flow_first' && flowConsumed) ||
+    (isHandedOverToAi && isAiActive)
 
   let automationReplied = false
   for (const triggerType of automationTriggers) {

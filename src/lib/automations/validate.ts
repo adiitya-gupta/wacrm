@@ -147,8 +147,9 @@ function validateOne(step: StepLike, path: string, issues: ValidationIssue[]): v
       }
       break
     case 'close_conversation':
-      // No config required.
-      break
+    case 'handover_to_ai':
+      // No mandatory config required.
+      break;
     default:
       issues.push({ path, message: t('unknownStepType', { type: step.step_type }) })
   }

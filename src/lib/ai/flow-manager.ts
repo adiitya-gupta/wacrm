@@ -664,23 +664,46 @@ export async function processConversationFlow(
     }
   }
 
-  // 9. Natural Language Discovery within Stage A (Understand Customer)
+  // 9. Natural Language Discovery within Stage A / Follow-up after Service Selection
   // Limit discovery questions to maxDiscoveryQuestions (default 2)
   if (state.discoveryQuestionsAsked >= (flowConfig.maxDiscoveryQuestions || 2)) {
-    // Discovery limit reached — present services menu instead of asking another open discovery question!
-    const serviceList = profile.services.map((s, i) => `${i + 1}. ${s.name}`).join('\n')
-    const greeting = effectiveContactName ? `Thanks for sharing those details, ${effectiveContactName}!` : 'Thanks for sharing those details!'
-    const text = `${greeting} We can certainly help. Which of our core services would make the biggest difference for you right now?\n\n${serviceList}\n\nOr let me know if you would like to explore pricing or schedule a call!`
+    if (!state.selectedService) {
+      // Discovery limit reached and no service selected yet — present services menu
+      const serviceList = profile.services.map((s, i) => `${i + 1}. ${s.name}`).join('\n')
+      const greeting = effectiveContactName ? `Thanks for sharing those details, ${effectiveContactName}!` : 'Thanks for sharing those details!'
+      const text = `${greeting} We can certainly help. Which of our core services would make the biggest difference for you right now?\n\n${serviceList}\n\nOr let me know if you would like to explore pricing or schedule a call!`
 
-    state.currentStage = 'STAGE_A_UNDERSTAND'
-    await persistFlowState(db, qualificationRecord.id, state, 'REQUIREMENT_DISCOVERY')
+      state.currentStage = 'STAGE_A_UNDERSTAND'
+      await persistFlowState(db, qualificationRecord.id, state, 'REQUIREMENT_DISCOVERY')
 
-    return {
-      text,
-      handoff: false,
-      state,
-      leadSummary: buildLeadSummary(state, profile),
+      return {
+        text,
+        handoff: false,
+        state,
+        leadSummary: buildLeadSummary(state, profile),
+      }
+    } else {
+      // Service is already selected and discovery limit reached: wrap up discovery and present next steps (never repeat the 6-service menu!)
+      const greeting = effectiveContactName ? `Thank you, ${effectiveContactName}!` : 'Thank you!'
+      const text = `${greeting} I have a good understanding of your requirements for ${state.selectedServiceName}. Would you like to explore our pricing packages or book a consultation call with our team?`
+      state.optionsOffered = ['1. Explore pricing', '2. Book a consultation']
+      state.currentStage = 'STAGE_B_ACKNOWLEDGE_SERVICE'
+      await persistFlowState(db, qualificationRecord.id, state, 'LEAD_QUALIFIED')
+      return {
+        text,
+        handoff: false,
+        state,
+        leadSummary: buildLeadSummary(state, profile),
+      }
     }
+  }
+
+  // Record user requirement if provided
+  if (userText) {
+    const prevReq = state.informationCollected['requirements']
+    state.informationCollected['requirements'] = prevReq
+      ? `${prevReq}; ${userText}`
+      : userText
   }
 
   // Ask focused discovery question via LLM within Stage A boundaries
@@ -845,7 +868,7 @@ export interface LeadQualificationRecord {
 /**
  * Persist deterministic state with backward-compatible fallback to qualification_notes.
  */
-async function persistFlowState(
+export async function persistFlowState(
   db: SupabaseClient,
   qualificationId: string,
   state: DeterministicFlowState,
@@ -894,7 +917,7 @@ async function persistFlowState(
 /**
  * Load or create an ai_lead_qualifications row.
  */
-async function loadOrCreateQualification(
+export async function loadOrCreateQualification(
   db: SupabaseClient,
   accountId: string,
   contactId: string,
@@ -1024,6 +1047,19 @@ function buildFlowSystemPrompt(args: {
     `## SERVICES OFFERED:`,
     ...profile.services.map((s) => `- ${s.name}: ${s.description}`),
   ]
+
+  if (state.selectedServiceName) {
+    parts.push(
+      '',
+      `## CURRENT SELECTED SERVICE CONTEXT:`,
+      `- The customer has already selected: "${state.selectedServiceName}".`,
+      state.informationCollected['requirements']
+        ? `- Customer stated requirements: "${state.informationCollected['requirements']}".`
+        : '',
+      `- CRITICAL: DO NOT ask them to choose or list services again. DO NOT output a catalog or menu of all services.`,
+      `- Acknowledge their requirement in the context of ${state.selectedServiceName}, and ask exactly ONE relevant follow-up question (such as expected message volume, peak traffic, current tools/stack, or specific business use case) to understand their setup.`,
+    )
+  }
 
   if (profile.customInstructions) {
     parts.push(`\n## CUSTOM INSTRUCTIONS:\n${profile.customInstructions}`)

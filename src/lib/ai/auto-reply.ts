@@ -24,7 +24,7 @@ interface DispatchArgs {
   contactId: string
   /** The account's WhatsApp config owner, used for the outbound send's
    *  audit columns (mirrors how the flow runner passes it through). */
-  configOwnerUserId: string
+  configOwnerUserId?: string
   /** Meta's wamid of the customer message we're replying to. When set,
    *  a typing indicator (which also marks it read) is shown while the
    *  reply is generated. Optional so older callers keep working. */
@@ -37,6 +37,8 @@ interface DispatchArgs {
   automationReplied?: boolean
   /** Account-level conversation mode */
   conversationMode?: ConversationMode
+  /** When true, forces AI generation even in automation_first mode (used by Handover to AI action) */
+  forceAiReply?: boolean
 }
 
 /**
@@ -75,6 +77,7 @@ export function isOpsiysAccount(accountId: string): boolean {
 export async function dispatchInboundToAiReply(
   args: DispatchArgs,
 ): Promise<void> {
+  const tStart = performance.now()
   const {
     accountId,
     conversationId,
@@ -83,6 +86,7 @@ export async function dispatchInboundToAiReply(
     inboundMessageId,
     automationReplied,
     conversationMode: callerMode,
+    forceAiReply,
   } = args
 
   try {
@@ -99,49 +103,24 @@ export async function dispatchInboundToAiReply(
       return
     }
 
-    // In automation_first mode, active conversational automations take priority.
-    // In ai_agent mode, the AI Agent owns the conversation by default and does not stand down
-    // for non-conflicting automations.
-    const effectiveMode = callerMode ?? config.conversationMode ?? 'ai_agent'
-    if (effectiveMode === 'automation_first') {
-      const { data: autoResponders } = await db
-        .from('automations')
-        .select('id, trigger_type, trigger_config')
-        .eq('account_id', accountId)
-        .eq('is_active', true)
-        .in('trigger_type', ['new_message_received', 'keyword_match'])
+    // Fetch conversation state, message context, token quota, and contact info in parallel
+    const [convRes, messages, tokenQuota, contactRes] = await Promise.all([
+      db
+        .from('conversations')
+        .select('assigned_agent_id, ai_autoreply_disabled, ai_reply_count')
+        .eq('id', conversationId)
+        .maybeSingle(),
+      buildConversationContext(db, conversationId),
+      checkAccountQuota(db, accountId, 'ai_tokens'),
+      db
+        .from('contacts')
+        .select('name, phone')
+        .eq('id', contactId)
+        .maybeSingle(),
+    ])
 
-      if (autoResponders && autoResponders.length > 0) {
-        const hasCatchAll = autoResponders.some(
-          (a) => a.trigger_type === 'new_message_received' || !a.trigger_type,
-        )
-        if (hasCatchAll) {
-          console.info(`[ai auto-reply] skipping: account ${accountId} has active new_message_received automation in automation_first mode`)
-          return
-        }
-
-        // Check if any keyword automation matches the latest user turn
-        const preContext = await buildConversationContext(db, conversationId)
-        const userText = (latestUserMessage(preContext) || '').toLowerCase()
-        const matchesKeyword = autoResponders.some((a) => {
-          if (a.trigger_type !== 'keyword_match') return false
-          const cfg = a.trigger_config as { keywords?: string[] } | undefined
-          if (!cfg?.keywords || cfg.keywords.length === 0) return true
-          return cfg.keywords.some((k) => userText.includes(k.toLowerCase()))
-        })
-
-        if (matchesKeyword) {
-          console.info(`[ai auto-reply] skipping: incoming message matched active keyword automation in automation_first mode`)
-          return
-        }
-      }
-    }
-
-    const { data: conv, error: convErr } = await db
-      .from('conversations')
-      .select('assigned_agent_id, ai_autoreply_disabled, ai_reply_count')
-      .eq('id', conversationId)
-      .maybeSingle()
+    const conv = convRes.data
+    const convErr = convRes.error
     if (convErr || !conv) {
       console.warn(`[ai auto-reply] skipping: conversation ${conversationId} query failed or not found:`, convErr)
       return
@@ -154,55 +133,90 @@ export async function dispatchInboundToAiReply(
       console.info(`[ai auto-reply] skipping: auto-reply is disabled for conversation ${conversationId} (prior handoff)`)
       return
     }
-    // Cheap early-out; the authoritative cap check is the atomic claim
-    // below (this read can race a concurrent inbound).
     if (conv.ai_reply_count >= config.autoReplyMaxPerConversation) {
       console.info(`[ai auto-reply] skipping: conversation ${conversationId} reached cap (${conv.ai_reply_count}/${config.autoReplyMaxPerConversation})`)
       return
     }
 
-    const messages = await buildConversationContext(db, conversationId)
     if (messages.length === 0) {
       console.info(`[ai auto-reply] skipping: conversation ${conversationId} has no message history`)
       return
     }
 
-    // Account-wide throttle on the shared BYO key. The per-conversation
-    // cap bounds one thread; this bounds a burst across many threads (a
-    // marketing blast landing 200 replies at once) so we never run the
-    // owner's key past the provider's rate limit. Over the limit → skip
-    // the auto-reply; the inbound still sits in the inbox for a human.
+    if (!tokenQuota.allowed) {
+      console.warn(`[ai auto-reply] account ${accountId} exceeded AI token quota: ${tokenQuota.reason}`)
+      return
+    }
+
+    // In automation_first mode, check whether this conversation was explicitly handed over to AI.
+    // If not handed over and not forceAiReply, active conversational automations take priority.
+    const effectiveMode = callerMode ?? config.conversationMode ?? 'ai_agent'
+    if (effectiveMode === 'automation_first' && !forceAiReply) {
+      const { data: activeQual } = await db
+        .from('ai_lead_qualifications')
+        .select('state')
+        .eq('conversation_id', conversationId)
+        .maybeSingle()
+      const isAlreadyHandedOver =
+        typeof activeQual?.state === 'string' &&
+        activeQual.state.length > 0 &&
+        activeQual.state !== 'HUMAN_HANDOFF' &&
+        activeQual.state !== 'MEETING_CANCELLED'
+
+      if (!isAlreadyHandedOver) {
+        const { data: autoResponders } = await db
+          .from('automations')
+          .select('id, trigger_type, trigger_config')
+          .eq('account_id', accountId)
+          .eq('is_active', true)
+          .in('trigger_type', ['new_message_received', 'keyword_match'])
+
+        if (autoResponders && autoResponders.length > 0) {
+          const hasCatchAll = autoResponders.some(
+            (a) => a.trigger_type === 'new_message_received' || !a.trigger_type,
+          )
+          if (hasCatchAll) {
+            console.info(`[ai auto-reply] skipping: account ${accountId} has active new_message_received automation in automation_first mode`)
+            return
+          }
+
+          // Check if any keyword automation matches the latest user turn from already loaded messages
+          const userText = (latestUserMessage(messages) || '').toLowerCase()
+          const matchesKeyword = autoResponders.some((a) => {
+            if (a.trigger_type !== 'keyword_match') return false
+            const cfg = a.trigger_config as { keywords?: string[] } | undefined
+            if (!cfg?.keywords || cfg.keywords.length === 0) return true
+            return cfg.keywords.some((k) => userText.includes(k.toLowerCase()))
+          })
+
+          if (matchesKeyword) {
+            console.info(`[ai auto-reply] skipping: incoming message matched active keyword automation in automation_first mode`)
+            return
+          }
+        }
+      }
+    }
+
+    // Account-wide throttle on the shared BYO key
     const acctLimit = await checkRateLimit(
       `ai-autoreply:${accountId}`,
       RATE_LIMITS.aiAutoReplyAccount,
     )
     if (!acctLimit.success) {
-      console.warn(
-        `[ai auto-reply] account ${accountId} hit the per-account rate limit — skipping this inbound.`,
-      )
+      console.warn(`[ai auto-reply] account ${accountId} hit the per-account rate limit — skipping this inbound.`)
       return
     }
 
-    // Check account AI token quota
-    const tokenQuota = await checkAccountQuota(db, accountId, 'ai_tokens')
-    if (!tokenQuota.allowed) {
-      console.warn(
-        `[ai auto-reply] account ${accountId} exceeded AI token quota: ${tokenQuota.reason}`,
-      )
-      return
-    }
-
-    // Every gate has passed — we're committed to attempting a reply, so
-    // show the customer "typing…" (and mark their message read) while the
-    // retrieval + LLM round trips run. Meta clears the indicator after
-    // 25 s or when our reply lands, whichever is first, so there's
-    // nothing to undo on the handoff / no-text path. Strictly
-    // best-effort: a failed indicator must never cost us the reply.
+    // Fire typing indicator asynchronously without blocking pre-inference lookups
     if (inboundMessageId) {
-      await showTypingIndicator(db, accountId, inboundMessageId)
+      void showTypingIndicator(db, accountId, inboundMessageId).catch((err) =>
+        console.warn('[ai auto-reply] typing indicator send failed:', err),
+      )
     }
 
-    // Ground the reply in the account's knowledge base (best-effort).
+    const tPreDb = performance.now() - tStart
+
+    // Ground the reply in the account's knowledge base (best-effort)
     const knowledge = await retrieveKnowledge(
       db,
       accountId,
@@ -216,18 +230,7 @@ export async function dispatchInboundToAiReply(
       knowledge,
     })
 
-    // Fetch contact details for personalized greeting and booking context
-    let contactRow: { name?: string | null; phone?: string | null } | null = null
-    try {
-      const { data } = await db
-        .from('contacts')
-        .select('name, phone')
-        .eq('id', contactId)
-        .maybeSingle()
-      contactRow = data
-    } catch {
-      // Best-effort
-    }
+    const contactRow = (contactRes?.data as { name?: string | null; phone?: string | null } | null) || null
 
     let text = ''
     let handoff = false
@@ -284,6 +287,17 @@ export async function dispatchInboundToAiReply(
       })
     }
 
+    let senderUserId: string = configOwnerUserId || ''
+    if (!senderUserId) {
+      const { data: adminProfile } = await db
+        .from('profiles')
+        .select('user_id')
+        .eq('account_id', accountId)
+        .limit(1)
+        .maybeSingle()
+      senderUserId = (adminProfile?.user_id as string | undefined) || '00000000-0000-0000-0000-000000000000'
+    }
+
     if (handoff || !text) {
       console.info(`[ai auto-reply] handing off conversation ${conversationId} to human (handoff=${handoff}, emptyText=${!text})`)
       const summary = buildHandoffSummary({
@@ -306,7 +320,7 @@ export async function dispatchInboundToAiReply(
         try {
           await engineSendText({
             accountId,
-            userId: configOwnerUserId,
+            userId: senderUserId,
             conversationId,
             contactId,
             text,
@@ -347,12 +361,15 @@ export async function dispatchInboundToAiReply(
     console.info(`[ai auto-reply] sending generated reply (${text.length} chars) to conversation ${conversationId}`)
     await engineSendText({
       accountId,
-      userId: configOwnerUserId,
+      userId: senderUserId,
       conversationId,
       contactId,
       text,
       aiGenerated: true,
     })
+    console.info(
+      `[ai latency] total: ${Math.round(performance.now() - tStart)}ms (pre_db: ${Math.round(tPreDb)}ms) to conversation ${conversationId}`,
+    )
   } catch (err) {
     console.error('[ai auto-reply] dispatch failed:', err)
   }

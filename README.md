@@ -120,6 +120,14 @@ Vercel Hobby accounts do not permit sub-daily cron jobs (such as `* * * * *`). T
 
 ---
 
+## Documentation
+
+- [**Complete User Manual**](./docs/manuals/WATTOMATION_COMPLETE_USER_MANUAL.md) — Comprehensive guide to AI Agents, Visual Flows (Beta), Automations, and CRM modules.
+- [**Operator Quick-Start Guide**](./docs/manuals/WATTOMATION_QUICK_START.md) — Fast-track 15-minute setup checklist for new workspaces.
+- [**Documentation Master Index**](./docs/README.md) — Index of all operational manuals, technical audits, and API references.
+
+---
+
 ## Tech Stack
 
 - **Framework**: Next.js 16 (App Router, Turbopack)

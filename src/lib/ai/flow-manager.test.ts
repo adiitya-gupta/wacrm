@@ -133,6 +133,35 @@ describe('Deterministic Conversation Flow Manager', () => {
     expect(matchServiceFromCatalog('I need email automation for my store', services)?.id).toBe('s1')
     expect(matchServiceFromCatalog('Tell me about your whatsapp bots', services)?.id).toBe('s2')
     expect(matchServiceFromCatalog('Just saying hello', services)).toBeNull()
+
+    // Verify multi-word and tokenized matching against real button titles
+    const multiServices = [
+      {
+        id: 'srv-ai',
+        name: 'AI & Business Automation',
+        description: 'AI agents, WhatsApp automation, and business process automation',
+        benefits: ['save time'],
+        keywords: ['ai', 'automation', 'bot', 'agent'],
+      },
+      {
+        id: 'srv-web',
+        name: 'Website & Web Application Development',
+        description: 'Business websites and web apps',
+        benefits: ['modern presence'],
+        keywords: [],
+      },
+      {
+        id: 'srv-seo',
+        name: 'SEO & Digital Marketing',
+        description: 'Technical SEO and marketing',
+        benefits: ['grow traffic'],
+        keywords: [],
+      },
+    ]
+
+    expect(matchServiceFromCatalog('AI & Automation', multiServices)?.id).toBe('srv-ai')
+    expect(matchServiceFromCatalog('Marketing & SEO', multiServices)?.id).toBe('srv-seo')
+    expect(matchServiceFromCatalog('Web & Development', multiServices)?.id).toBe('srv-web')
   })
 
   it('Stage B: Immediately acknowledges selected service with benefit and exactly 2 options', async () => {

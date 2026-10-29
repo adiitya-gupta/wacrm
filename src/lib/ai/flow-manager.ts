@@ -110,6 +110,13 @@ export function matchServiceFromCatalog(
   if (!text || services.length === 0) return null
   const lower = text.toLowerCase()
 
+  // 0. Direct ID match
+  for (const s of services) {
+    if (s.id && (s.id === text || s.id.toLowerCase() === lower)) {
+      return s
+    }
+  }
+
   const isStatingEmail =
     EMAIL_REGEX.test(text) ||
     lower.includes('work email') ||
@@ -124,13 +131,13 @@ export function matchServiceFromCatalog(
     lower.includes('cold email') ||
     lower.includes('newsletter')
 
-  // 1. Direct name match
+  // 1. Direct name match or reverse substring
   for (const s of services) {
     const sLower = s.name.toLowerCase()
     if (sLower.includes('email') && isStatingEmail && !hasEmailServiceIntent) {
       continue
     }
-    if (lower.includes(sLower)) {
+    if (lower.includes(sLower) || sLower.includes(lower)) {
       return s
     }
   }
@@ -143,14 +150,63 @@ export function matchServiceFromCatalog(
         if (kwLower === 'email' && isStatingEmail && !hasEmailServiceIntent) {
           continue
         }
-        if (lower.includes(kwLower)) {
+        if (lower.includes(kwLower) || kwLower.includes(lower)) {
           return s
         }
       }
     }
   }
 
-  // 3. Common industry pattern match
+  // 3. Tokenized word overlap match (e.g. "Marketing & SEO" vs "SEO & Digital Marketing", "AI & Automation" vs "AI & Business Automation", "Web & Development" vs "Website & Web Application Development")
+  const stopWords = new Set(['and', '&', 'the', 'for', 'our', 'with', 'your', 'services', 'solutions', 'package', 'packages'])
+  const inputTokens = lower
+    .split(/[\s/,&+]+/)
+    .map((w) => w.replace(/[^a-z0-9]/g, ''))
+    .filter((w) => w.length >= 2 && !stopWords.has(w))
+
+  if (inputTokens.length > 0) {
+    let bestService: ServiceItem | null = null
+    let maxOverlap = 0
+
+    for (const s of services) {
+      const sTokens = s.name
+        .toLowerCase()
+        .split(/[\s/,&+]+/)
+        .map((w) => w.replace(/[^a-z0-9]/g, ''))
+        .filter((w) => w.length >= 2 && !stopWords.has(w))
+
+      const kwTokens = (s.keywords || [])
+        .map((k) => k.toLowerCase().replace(/[^a-z0-9]/g, ''))
+        .filter((w) => w.length >= 2 && !stopWords.has(w))
+
+      const allSTokens = new Set([...sTokens, ...kwTokens])
+
+      let overlap = 0
+      for (const tok of inputTokens) {
+        if (tok === 'email' && isStatingEmail && !hasEmailServiceIntent) {
+          continue
+        }
+        const match = Array.from(allSTokens).some(
+          (st) =>
+            st === tok ||
+            (tok.length >= 3 && st.startsWith(tok.slice(0, 3))) ||
+            (st.length >= 3 && tok.startsWith(st.slice(0, 3))),
+        )
+        if (match) overlap++
+      }
+
+      if (overlap > maxOverlap) {
+        maxOverlap = overlap
+        bestService = s
+      }
+    }
+
+    if (bestService && maxOverlap >= 1) {
+      return bestService
+    }
+  }
+
+  // 4. Common industry pattern match
   for (const s of services) {
     const sLower = s.name.toLowerCase()
     const matchesEmailPattern =

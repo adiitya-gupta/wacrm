@@ -1191,4 +1191,47 @@ describe("handover_to_ai action", () => {
       }),
     );
   });
+
+  it("gracefully records failure and completes when AI is unconfigured without getting conversation stuck", async () => {
+    h.loadAiConfig.mockResolvedValueOnce(null);
+
+    h.state.automations = [
+      {
+        id: autoId,
+        account_id: ACCOUNT,
+        user_id: "user-1",
+        is_active: true,
+        trigger_type: "keyword_match",
+        trigger_config: { keywords: ["hi"], match_type: "contains" },
+      },
+    ];
+    h.state.steps = [
+      {
+        id: "s1",
+        automation_id: autoId,
+        position: 0,
+        parent_step_id: null,
+        branch: null,
+        step_type: "handover_to_ai",
+        step_config: { instruction: "Guide user" },
+      },
+    ];
+
+    await runAutomationsForTrigger({
+      accountId: ACCOUNT,
+      triggerType: "keyword_match",
+      contactId,
+      context: { message_text: "hi", conversation_id: convId },
+    });
+
+    const finalLog = h.state.logUpdates.at(-1) as Record<string, unknown>;
+    expect(finalLog.status).toBe("success");
+    expect(finalLog.steps_executed).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ detail: "AI not configured" }),
+      ]),
+    );
+    expect(h.state.pending).toHaveLength(0);
+    expect(h.dispatchInboundToAiReply).not.toHaveBeenCalled();
+  });
 });

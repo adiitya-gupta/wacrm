@@ -1108,9 +1108,12 @@ async function runStep(step: AutomationStep, args: ExecuteArgs): Promise<string>
 
       const tapId = args.context.interactive_reply_id
       const msgText = args.context.message_text || ''
-      const selectionInput = tapId || msgText
 
-      const matched = matchServiceFromCatalog(selectionInput, profile.services)
+      // Prefer message_text (e.g. human-readable button title "AI & Automation")
+      // then fall back to tapId (e.g. "btn_1" or service ID)
+      const matched =
+        (msgText ? matchServiceFromCatalog(msgText, profile.services) : null) ||
+        (tapId ? matchServiceFromCatalog(tapId, profile.services) : null)
 
       const qual = await loadOrCreateQualification(
         db,
@@ -1126,6 +1129,12 @@ async function runStep(step: AutomationStep, args: ExecuteArgs): Promise<string>
         if (!flowState.servicesIdentified.includes(matched.name)) {
           flowState.servicesIdentified.push(matched.name)
         }
+        flowState.benefitsExplained = false
+        flowState.discoveryQuestionsAsked = 0
+        flowState.pricingRequested = false
+        flowState.consultationRequested = false
+        flowState.pricingDiscussed = false
+        flowState.pendingBooking = {}
       }
       if (cfg.instruction) {
         flowState.informationCollected['automation_instruction'] = cfg.instruction
@@ -1138,7 +1147,7 @@ async function runStep(step: AutomationStep, args: ExecuteArgs): Promise<string>
         matched ? 'LEAD_QUALIFIED' : 'REQUIREMENT_DISCOVERY',
       )
 
-      if (selectionInput) {
+      if (msgText || tapId) {
         await dispatchInboundToAiReply({
           accountId: args.automation.account_id,
           conversationId,

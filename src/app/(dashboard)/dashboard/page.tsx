@@ -17,6 +17,7 @@ import {
   loadMetrics,
   loadPipelineDonut,
   loadResponseTime,
+  loadSystemHealth,
 } from '@/lib/dashboard/queries'
 import type {
   ActivityItem,
@@ -24,11 +25,13 @@ import type {
   MetricsBundle,
   PipelineDonutData,
   ResponseTimeSummary,
+  SystemHealthData,
 } from '@/lib/dashboard/types'
 
 import { MetricCard } from '@/components/dashboard/metric-card'
 import { SkeletonCard } from '@/components/dashboard/skeleton'
 import { QuickActions } from '@/components/dashboard/quick-actions'
+import { SystemHealth } from '@/components/dashboard/system-health'
 import { ConversationsChart } from '@/components/dashboard/conversations-chart'
 import { PipelineDonut } from '@/components/dashboard/pipeline-donut'
 import { ResponseTimeChart } from '@/components/dashboard/response-time-chart'
@@ -64,6 +67,9 @@ export default function DashboardPage() {
   const [activity, setActivity] = useState<ActivityItem[] | null>(null)
   const [activityLoading, setActivityLoading] = useState(true)
 
+  const [systemHealth, setSystemHealth] = useState<SystemHealthData | null>(null)
+  const [systemHealthLoading, setSystemHealthLoading] = useState(true)
+
   const loadAll = useCallback(() => {
     const db = createClient()
 
@@ -74,6 +80,11 @@ export default function DashboardPage() {
       .then((m) => setMetrics(m))
       .catch((err) => console.error('[dashboard] metrics failed:', err))
       .finally(() => setMetricsLoading(false))
+
+    void loadSystemHealth(db)
+      .then((h) => setSystemHealth(h))
+      .catch((err) => console.error('[dashboard] system health failed:', err))
+      .finally(() => setSystemHealthLoading(false))
 
     void loadConversationsSeries(db, 30)
       .then((s) => setSeries((prev) => ({ ...prev, 30: s })))
@@ -190,6 +201,9 @@ export default function DashboardPage() {
 
       {/* Quick actions */}
       <QuickActions />
+
+      {/* System & AI Engine Health */}
+      <SystemHealth data={systemHealth} loading={systemHealthLoading} />
 
       {/* Charts row */}
       {/* items-stretch (the grid default) stretches the two columns to

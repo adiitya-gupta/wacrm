@@ -64,7 +64,44 @@ export const PRICING_INTENT_REGEX =
   /\b(pricing|price|prices|cost|costs|rate|rates|package|packages|how much|fee|fees|quote|quotation|explore pricing|option 1|^1$)\b/i
 
 export const CONSULTATION_INTENT_REGEX =
-  /\b(consultation|meeting|call|demo|schedule|book|calendar|appointment|discuss|talk to team|book a consultation|option 2|^2$)\b/i
+  /\b(consultation|consultant|consult|consulting|meeting|call|demo|schedule|book|calendar|appointment|discuss|talk to team|book a consultation|option 2|^2$)\b/i
+
+export const CORRECTION_INTENT_REGEX =
+  /\b(i (already )?(told|said|asked for|meant|specified|selected)|not (ai|that|this)|you (said|thought)|i chose)\b/i
+
+export const GENERIC_INTENT_WORDS = new Set([
+  'service',
+  'services',
+  'consultation',
+  'consultant',
+  'consult',
+  'consulting',
+  'help',
+  'work',
+  'package',
+  'packages',
+  'pricing',
+  'price',
+  'quote',
+  'quotation',
+  'cost',
+  'costs',
+  'call',
+  'meeting',
+  'appointment',
+  'demo',
+  'schedule',
+  'booking',
+  'book',
+  'yes',
+  'no',
+  'option',
+  'explore',
+  'standard',
+  'hi',
+  'hello',
+  'hey',
+])
 
 /**
  * Resolve effective business profile for a tenant.
@@ -113,13 +150,22 @@ export function matchServiceFromCatalog(
   services: ServiceItem[],
 ): ServiceItem | null {
   if (!text || services.length === 0) return null
-  const lower = text.toLowerCase()
+  const lower = text.toLowerCase().trim()
 
   // 0. Direct ID match
   for (const s of services) {
     if (s.id && (s.id === text || s.id.toLowerCase() === lower)) {
       return s
     }
+  }
+
+  // Pure generic intent words (e.g. "Yes consultant", "consultation", "explore pricing", "service") must NEVER resolve as a specific service
+  const rawWords = lower
+    .split(/[\s,./?!&+-]+/)
+    .map((w) => w.trim())
+    .filter(Boolean)
+  if (rawWords.length > 0 && rawWords.every((w) => GENERIC_INTENT_WORDS.has(w))) {
+    return null
   }
 
   const isStatingEmail =
@@ -142,16 +188,22 @@ export function matchServiceFromCatalog(
     if (sLower.includes('email') && isStatingEmail && !hasEmailServiceIntent) {
       continue
     }
-    if (lower.includes(sLower) || sLower.includes(lower)) {
+    if (lower === sLower || (lower.length >= 6 && lower.includes(sLower))) {
+      return s
+    }
+    if (sLower.includes(lower) && !GENERIC_INTENT_WORDS.has(lower) && lower.length >= 4) {
       return s
     }
   }
 
-  // 2. Keyword match (with word boundaries to avoid substring false-positives like 'unmapped' matching 'app')
+  // 2. Keyword match (with word boundaries; ignore any generic intent words)
   for (const s of services) {
     if (s.keywords && s.keywords.length > 0) {
       for (const kw of s.keywords) {
-        const kwLower = kw.toLowerCase()
+        const kwLower = kw.toLowerCase().trim()
+        if (GENERIC_INTENT_WORDS.has(kwLower)) {
+          continue
+        }
         if (kwLower === 'email' && isStatingEmail && !hasEmailServiceIntent) {
           continue
         }
@@ -163,8 +215,11 @@ export function matchServiceFromCatalog(
     }
   }
 
-  // 3. Tokenized word overlap match (e.g. "Marketing & SEO" vs "SEO & Digital Marketing", "AI & Automation" vs "AI & Business Automation", "Web & Development" vs "Website & Web Application Development")
-  const stopWords = new Set(['and', '&', 'the', 'for', 'our', 'with', 'your', 'services', 'solutions', 'package', 'packages'])
+  // 3. Tokenized word overlap match (e.g. "Web & Development" vs "Website & Web Application Development")
+  const stopWords = new Set([
+    'and', '&', 'the', 'for', 'our', 'with', 'your', 'solutions',
+    ...Array.from(GENERIC_INTENT_WORDS),
+  ])
   const inputTokens = lower
     .split(/[\s/,&+]+/)
     .map((w) => w.replace(/[^a-z0-9]/g, ''))
@@ -195,8 +250,7 @@ export function matchServiceFromCatalog(
         const match = Array.from(allSTokens).some(
           (st) =>
             st === tok ||
-            (tok.length >= 3 && st.startsWith(tok.slice(0, 3))) ||
-            (st.length >= 3 && tok.startsWith(st.slice(0, 3))),
+            (tok.length >= 5 && st.length >= 5 && (st.startsWith(tok.slice(0, 5)) || tok.startsWith(st.slice(0, 5)))),
         )
         if (match) overlap++
       }
@@ -606,9 +660,75 @@ export async function processConversationFlow(
   }
 
   // 6. Service Identification & Catalog Matching
+  const isCorrection = CORRECTION_INTENT_REGEX.test(userText)
+  const isExplicitServiceSwitch =
+    /\b(switch to|change to|instead of|instead|tell me about|what about|how about|actually|looking for|interested in|do you also (do|have)|can we do)\b/i.test(userText)
+  const isInteractiveButtonTap =
+    lowerUserText.startsWith('btn_') ||
+    profile.services.some((s) => s.id && s.id.toLowerCase() === lowerUserText)
+
   const matchedService = matchServiceFromCatalog(userText, profile.services)
+
+  // 6A. Customer is correcting the AI ("I told website development")
+  if (isCorrection) {
+    const correctedService =
+      matchedService ||
+      (state.selectedService ? profile.services.find((s) => s.id === state.selectedService) : null)
+
+    if (correctedService) {
+      state.selectedService = correctedService.id
+      state.selectedServiceName = correctedService.name
+      if (!state.servicesIdentified.includes(correctedService.name)) {
+        state.servicesIdentified.push(correctedService.name)
+      }
+      const apology = `My apologies for the confusion! You're absolutely right — we are discussing ${correctedService.name}.`
+
+      // If customer previously requested a consultation or pricing was explored, resume that path
+      if (state.consultationRequested || lowerUserText.includes('consult')) {
+        state.consultationRequested = true
+        state.currentStage = 'SLOT_SELECTION'
+        const slots = await getAvailableSlots(db, accountId, { limit: 3 })
+        const formattedSlots = formatSlotsForWhatsApp(slots)
+        await persistFlowState(db, qualificationRecord.id, state, 'SLOT_SELECTION', slots)
+        return {
+          text: `${apology} Let's get your consultation scheduled for your ${correctedService.name} project:\n\n${formattedSlots}\n\nWhich slot works best, or let us know a day/time that suits you!`,
+          handoff: false,
+          state,
+          leadSummary: buildLeadSummary(state, profile),
+        }
+      }
+
+      if (state.pricingRequested) {
+        state.currentStage = 'STAGE_C_PRICING'
+        state.pricingDiscussed = true
+        const pricingInfo = formatPricingPackages(profile.pricingPackages, state.selectedService)
+        await persistFlowState(db, qualificationRecord.id, state, 'LEAD_QUALIFIED')
+        return {
+          text: `${apology}\n\nHere are our pricing options for ${correctedService.name}:\n\n${pricingInfo}\n\nWould you like to schedule a quick 15-minute consultation to tailor this to your requirements?`,
+          handoff: false,
+          state,
+          leadSummary: buildLeadSummary(state, profile),
+        }
+      }
+
+      // Default correction response: continue without restarting Stage B introduction
+      await persistFlowState(db, qualificationRecord.id, state, 'REQUIREMENT_DISCOVERY')
+      return {
+        text: `${apology} Would you like to explore our pricing options or schedule a quick consultation to discuss your requirements?`,
+        handoff: false,
+        state,
+        leadSummary: buildLeadSummary(state, profile),
+      }
+    }
+  }
+
+  // 6B. Normal Service Identification & Selection
   if (matchedService) {
-    if (!state.selectedService || state.selectedService !== matchedService.id) {
+    // If a service was ALREADY selected, only switch if explicit switch intent or interactive button tap
+    const canSelectService =
+      !state.selectedService || isExplicitServiceSwitch || isInteractiveButtonTap
+
+    if (canSelectService && state.selectedService !== matchedService.id) {
       state.selectedService = matchedService.id
       state.selectedServiceName = matchedService.name
       if (!state.servicesIdentified.includes(matchedService.name)) {
@@ -649,9 +769,26 @@ export async function processConversationFlow(
 
   // 7. Intent Recognition: Pricing vs Consultation
   const asksPricing = PRICING_INTENT_REGEX.test(userText)
+
+  const priorOfferedConsultation =
+    priorAssistantText.includes('consultation') ||
+    priorAssistantText.includes('schedule a call') ||
+    priorAssistantText.includes('schedule a quick') ||
+    state.currentStage === 'STAGE_C_PRICING'
+
   const asksConsultation =
     CONSULTATION_INTENT_REGEX.test(userText) ||
-    (state.optionsOffered.includes('2') && (lowerUserText === '2' || lowerUserText.includes('consultation')))
+    lowerUserText.includes('consultant') ||
+    lowerUserText.includes('consult') ||
+    (priorOfferedConsultation &&
+      (nlpResult.isAffirmative ||
+        isAffirmativeResponse(userText) ||
+        lowerUserText.includes('yes') ||
+        lowerUserText.includes('sure'))) ||
+    (state.optionsOffered.includes('2') &&
+      (lowerUserText === '2' ||
+        lowerUserText.includes('consultation') ||
+        lowerUserText.includes('consultant')))
 
   if (asksPricing) {
     state.pricingRequested = true
@@ -680,8 +817,9 @@ export async function processConversationFlow(
       },
     )
 
+    const serviceLabel = state.selectedServiceName ? ` for ${state.selectedServiceName}` : ''
     const text = slots.length > 0
-      ? `We'd love to schedule a consultation with you! Here are our next available slots:\n\n${formattedSlots}\n\nWhich slot works best, or let us know a day/time that suits you!`
+      ? `We'd love to schedule a consultation with you${serviceLabel}! Here are our next available slots:\n\n${formattedSlots}\n\nWhich slot works best, or let us know a day/time that suits you!`
       : detailPrompt
 
     return {

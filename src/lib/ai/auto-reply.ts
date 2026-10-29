@@ -217,12 +217,14 @@ export async function dispatchInboundToAiReply(
     const tPreDb = performance.now() - tStart
 
     // Ground the reply in the account's knowledge base (best-effort)
+    const tKnowledgeStart = performance.now()
     const knowledge = await retrieveKnowledge(
       db,
       accountId,
       config,
       latestUserMessage(messages),
     )
+    const tKnowledge = performance.now() - tKnowledgeStart
 
     const systemPrompt = buildSystemPrompt({
       userPrompt: config.systemPrompt,
@@ -236,6 +238,7 @@ export async function dispatchInboundToAiReply(
     let handoff = false
     let usage: AiUsage | null = null
 
+    const tGenStart = performance.now()
     try {
       const flowResult = await processConversationFlow({
         db,
@@ -266,6 +269,7 @@ export async function dispatchInboundToAiReply(
       handoff = gen.handoff
       usage = gen.usage
     }
+    const tGen = performance.now() - tGenStart
 
     // Record token spend on the account's BYO key. Fire-and-forget so it
     // never adds latency to the customer-facing send: `logAiUsage`
@@ -359,6 +363,7 @@ export async function dispatchInboundToAiReply(
     }
 
     console.info(`[ai auto-reply] sending generated reply (${text.length} chars) to conversation ${conversationId}`)
+    const tOutboundStart = performance.now()
     await engineSendText({
       accountId,
       userId: senderUserId,
@@ -367,8 +372,9 @@ export async function dispatchInboundToAiReply(
       text,
       aiGenerated: true,
     })
+    const tOutbound = performance.now() - tOutboundStart
     console.info(
-      `[ai latency] total: ${Math.round(performance.now() - tStart)}ms (pre_db: ${Math.round(tPreDb)}ms) to conversation ${conversationId}`,
+      `[ai latency] total: ${Math.round(performance.now() - tStart)}ms (pre_db: ${Math.round(tPreDb)}ms, knowledge: ${Math.round(tKnowledge)}ms, gen: ${Math.round(tGen)}ms, outbound: ${Math.round(tOutbound)}ms) to conversation ${conversationId}`,
     )
   } catch (err) {
     console.error('[ai auto-reply] dispatch failed:', err)

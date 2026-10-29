@@ -15,6 +15,7 @@ import type {
   PipelineStageSlice,
   ResponseTimeBucket,
   ResponseTimeSummary,
+  SystemHealthData,
 } from './types'
 import { getT } from '@/lib/i18n/translate'
 
@@ -404,3 +405,56 @@ export async function loadActivity(db: DB, limit = 20): Promise<ActivityItem[]> 
     .sort((a, b) => (a.at > b.at ? -1 : a.at < b.at ? 1 : 0))
     .slice(0, limit)
 }
+
+// --- 5. System & AI Engine Health --------------------------------------
+
+export async function loadSystemHealth(db: DB): Promise<SystemHealthData> {
+  const oneDayAgo = daysAgoStart(1).toISOString()
+
+  const [
+    aiConfigRes,
+    activeAutos,
+    totalAutos,
+    activeFlows,
+    totalFlows,
+    failedLogs,
+  ] = await Promise.all([
+    db.from('ai_configs').select('is_active, auto_reply_enabled, provider, model').maybeSingle(),
+    db.from('automations').select('id', { count: 'exact', head: true }).eq('is_active', true),
+    db.from('automations').select('id', { count: 'exact', head: true }),
+    db.from('flows').select('id', { count: 'exact', head: true }).eq('status', 'active'),
+    db.from('flows').select('id', { count: 'exact', head: true }).neq('status', 'archived'),
+    db
+      .from('automation_logs')
+      .select('id', { count: 'exact', head: true })
+      .eq('status', 'failed')
+      .gte('created_at', oneDayAgo),
+  ])
+
+  const aiRow = (aiConfigRes.data as {
+    is_active?: boolean
+    auto_reply_enabled?: boolean
+    provider?: string
+    model?: string
+  } | null) || null
+
+  return {
+    aiStatus: {
+      configured: !!aiRow,
+      active: !!aiRow?.is_active,
+      autoReplyEnabled: !!aiRow?.auto_reply_enabled,
+      provider: aiRow?.provider,
+      model: aiRow?.model,
+    },
+    automations: {
+      activeCount: activeAutos.count ?? 0,
+      totalCount: totalAutos.count ?? 0,
+    },
+    flows: {
+      activeCount: activeFlows.count ?? 0,
+      totalCount: totalFlows.count ?? 0,
+    },
+    recentErrorsCount: failedLogs.count ?? 0,
+  }
+}
+

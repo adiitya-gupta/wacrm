@@ -133,6 +133,16 @@ export function validateFlowForActivation(
         });
       }
     }
+
+    // Auto-advance infinite cycle detection
+    const cycles = detectAutoAdvanceCycles(flow.entry_node_id, nodes);
+    for (const cycle of cycles) {
+      issues.push({
+        severity: "error",
+        scope: "flow",
+        message: `Detected an infinite loop of auto-advancing nodes: ${cycle.join(" -> ")}. Nodes must include user input steps (buttons, list, input) or terminal steps.`,
+      });
+    }
   }
 
   return issues;
@@ -804,4 +814,56 @@ function outgoingEdges(node: NodeInput): string[] {
     default:
       return [];
   }
+}
+
+/**
+ * Detect cycles consisting purely of auto-advancing nodes
+ * (nodes that do not suspend for user interaction: start, send_message, send_media, condition, set_tag).
+ */
+export function detectAutoAdvanceCycles(
+  entryKey: string | null,
+  nodes: NodeInput[],
+): string[][] {
+  if (!entryKey) return [];
+  const byKey = new Map<string, NodeInput>();
+  for (const n of nodes) byKey.set(n.node_key, n);
+
+  const autoAdvanceTypes = new Set([
+    "start",
+    "send_message",
+    "send_media",
+    "condition",
+    "set_tag",
+  ]);
+
+  const cycles: string[][] = [];
+  const visited = new Set<string>();
+  const recursionStack = new Set<string>();
+  const currentPath: string[] = [];
+
+  function dfs(key: string) {
+    const node = byKey.get(key);
+    if (!node || !autoAdvanceTypes.has(node.node_type)) return;
+
+    visited.add(key);
+    recursionStack.add(key);
+    currentPath.push(key);
+
+    for (const next of outgoingEdges(node)) {
+      if (recursionStack.has(next)) {
+        const cycleStartIndex = currentPath.indexOf(next);
+        if (cycleStartIndex !== -1) {
+          cycles.push([...currentPath.slice(cycleStartIndex), next]);
+        }
+      } else if (!visited.has(next)) {
+        dfs(next);
+      }
+    }
+
+    currentPath.pop();
+    recursionStack.delete(key);
+  }
+
+  dfs(entryKey);
+  return cycles;
 }

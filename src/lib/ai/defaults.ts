@@ -59,7 +59,7 @@ export const DEFAULT_AI_BUSINESS_PROFILE: AiBusinessProfile = {
       name: 'General Consultation & Services',
       description: 'Professional guidance and implementation for your requirements.',
       benefits: ['save valuable time and effort', 'achieve reliable and high-quality results'],
-      keywords: ['service', 'consultation', 'help', 'services', 'work'],
+      keywords: ['general inquiry', 'consultation inquiry'],
     },
   ],
   pricingPackages: [

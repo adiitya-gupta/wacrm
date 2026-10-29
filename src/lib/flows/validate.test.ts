@@ -547,3 +547,37 @@ describe("reachableFromEntry", () => {
     expect(set).toEqual(new Set(["a", "b"]));
   });
 });
+
+describe("detectAutoAdvanceCycles & cycle validation", () => {
+  it("flags an infinite auto-advance loop between messages as an error", () => {
+    const cycleNodes = [
+      { node_key: "start", node_type: "start", config: { next_node_key: "msg1" } },
+      { node_key: "msg1", node_type: "send_message", config: { text: "Hello", next_node_key: "msg2" } },
+      { node_key: "msg2", node_type: "send_message", config: { text: "World", next_node_key: "msg1" } },
+    ];
+    const issues = validateFlowForActivation(
+      { ...validFlow, entry_node_id: "start" },
+      cycleNodes,
+    );
+    expect(issues.some((i) => i.severity === "error" && i.message.includes("infinite loop"))).toBe(true);
+  });
+
+  it("does not flag loops that break on interactive user input (buttons/input)", () => {
+    const interactiveLoop = [
+      { node_key: "start", node_type: "start", config: { next_node_key: "menu" } },
+      {
+        node_key: "menu",
+        node_type: "send_buttons",
+        config: {
+          text: "Choose",
+          buttons: [{ reply_id: "retry", title: "Retry", next_node_key: "menu" }],
+        },
+      },
+    ];
+    const issues = validateFlowForActivation(
+      { ...validFlow, entry_node_id: "start" },
+      interactiveLoop,
+    );
+    expect(issues.some((i) => i.message.includes("infinite loop"))).toBe(false);
+  });
+});

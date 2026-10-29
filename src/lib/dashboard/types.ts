@@ -65,3 +65,22 @@ export interface ActivityItem {
   /** Optional deep-link for the whole row (not all items have a target). */
   href?: string
 }
+
+export interface SystemHealthData {
+  aiStatus: {
+    configured: boolean
+    active: boolean
+    autoReplyEnabled: boolean
+    provider?: string
+    model?: string
+  }
+  automations: {
+    activeCount: number
+    totalCount: number
+  }
+  flows: {
+    activeCount: number
+    totalCount: number
+  }
+  recentErrorsCount: number
+}

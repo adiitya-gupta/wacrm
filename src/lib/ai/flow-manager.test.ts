@@ -765,6 +765,163 @@ describe('Deterministic Conversation Flow Manager', () => {
       expect(result.text).toContain('1. AI & Business Automation')
       expect(result.text).toContain('2. Website & Web Application Development')
     })
+
+    it('MANDATORY REGRESSION: full sequence Web & Development -> Pricing -> Yes consultant -> I told website development', async () => {
+      // Setup tenant config with realistic service keywords and pricing packages
+      const regressionConfig: AiConfig = {
+        ...baseConfig,
+        businessProfile: {
+          ...DEFAULT_AI_BUSINESS_PROFILE,
+          businessName: 'OPSIYS Tech Agency',
+          services: [
+            {
+              id: 'srv-1',
+              name: 'AI & Business Automation',
+              description: 'AI agents, WhatsApp bots, and CRM automation',
+              benefits: ['Save 20+ hours a week', 'Automate customer support'],
+              keywords: ['service', 'consultation', 'help', 'services', 'work'], // realistic legacy keyword noise
+            },
+            {
+              id: 'srv-web-2',
+              name: 'Website & Web Application Development',
+              description: 'Custom web apps, high-converting landing pages, and redesigns',
+              benefits: ['Professional web presence', 'Convert visitors to paying clients'],
+              keywords: ['website', 'web dev', 'web application'],
+            },
+          ],
+          pricingPackages: [
+            {
+              id: 'pkg-web-1',
+              name: 'Web Development Standard',
+              price: '$1,499',
+              billingPeriod: 'one-time setup',
+              serviceId: 'srv-web-2',
+              description: 'Full custom responsive website with modern CMS and SEO',
+              features: ['Responsive UI', 'SEO ready', 'Fast delivery'],
+            },
+            {
+              id: 'pkg-ai-1',
+              name: 'AI Automation Starter',
+              price: '$999',
+              billingPeriod: 'per month',
+              serviceId: 'srv-1',
+              description: '24/7 AI chatbot with lead qualification and CRM sync',
+              features: ['WhatsApp integration', 'Lead qualification'],
+            },
+          ],
+        },
+      }
+
+      const db = createMockSupabase(null)
+      const convId = 'conv-regression-web-dev'
+      const contactId = 'contact-client-1'
+
+      // Step 1: Customer sends "Web & Development"
+      const messagesTurn1: ChatMessage[] = [
+        { role: 'user', content: 'Hi' },
+        { role: 'assistant', content: 'Hi! Welcome to OPSIYS. Which service are you interested in?' },
+        { role: 'user', content: 'Web & Development' },
+      ]
+
+      const turn1 = await processConversationFlow({
+        db,
+        accountId: 'acct-custom-tenant',
+        conversationId: convId,
+        contactId,
+        messages: messagesTurn1,
+        config: regressionConfig,
+        contactName: 'Alex',
+      })
+
+      // Verification 1: AI acknowledges Website & Web Development only
+      expect(turn1.state.selectedService).toBe('srv-web-2')
+      expect(turn1.state.selectedServiceName).toBe('Website & Web Application Development')
+      expect(turn1.state.currentStage).toBe('STAGE_B_ACKNOWLEDGE_SERVICE')
+      expect(turn1.text).toContain('Website & Web Application Development')
+      expect(turn1.text).not.toContain('AI & Business Automation')
+      expect(turn1.text).toContain('1. Explore pricing')
+      expect(turn1.text).toContain('2. Book a consultation')
+
+      // Step 2: Customer replies "1" to explore pricing
+      const messagesTurn2: ChatMessage[] = [
+        ...messagesTurn1,
+        { role: 'assistant', content: turn1.text },
+        { role: 'user', content: '1' },
+      ]
+
+      const turn2 = await processConversationFlow({
+        db,
+        accountId: 'acct-custom-tenant',
+        conversationId: convId,
+        contactId,
+        messages: messagesTurn2,
+        config: regressionConfig,
+        contactName: 'Alex',
+      })
+
+      // Verification 2: AI provides configured website development pricing
+      expect(turn2.state.selectedService).toBe('srv-web-2')
+      expect(turn2.state.selectedServiceName).toBe('Website & Web Application Development')
+      expect(turn2.state.currentStage).toBe('STAGE_C_PRICING')
+      expect(turn2.state.pricingRequested).toBe(true)
+      expect(turn2.text).toContain('Web Development Standard')
+      expect(turn2.text).toContain('$1,499')
+      expect(turn2.text).not.toContain('AI Automation Starter')
+
+      // Step 3: Customer replies "Yes consultant"
+      const messagesTurn3: ChatMessage[] = [
+        ...messagesTurn2,
+        { role: 'assistant', content: turn2.text },
+        { role: 'user', content: 'Yes consultant' },
+      ]
+
+      const turn3 = await processConversationFlow({
+        db,
+        accountId: 'acct-custom-tenant',
+        conversationId: convId,
+        contactId,
+        messages: messagesTurn3,
+        config: regressionConfig,
+        contactName: 'Alex',
+      })
+
+      // Verification 3: Retains Website & Web Development, transitions to consultation/slots, DOES NOT switch to AI & Automation
+      expect(turn3.state.selectedService).toBe('srv-web-2')
+      expect(turn3.state.selectedServiceName).toBe('Website & Web Application Development')
+      expect(turn3.state.consultationRequested).toBe(true)
+      expect(turn3.state.currentStage).toBe('SLOT_SELECTION')
+      expect(turn3.text).not.toContain('AI & Business Automation')
+      expect(turn3.text).not.toContain('Thanks for your interest in our AI & Business Automation')
+      expect(turn3.text).toContain('consultation')
+
+      // Step 4: Customer says "I told website development"
+      const messagesTurn4: ChatMessage[] = [
+        ...messagesTurn3,
+        { role: 'assistant', content: turn3.text },
+        { role: 'user', content: 'I told website development' },
+      ]
+
+      const turn4 = await processConversationFlow({
+        db,
+        accountId: 'acct-custom-tenant',
+        conversationId: convId,
+        contactId,
+        messages: messagesTurn4,
+        config: regressionConfig,
+        contactName: 'Alex',
+      })
+
+      // Verification 4: Acknowledges correction, retains Website & Web Development, continues consultation without restarting greeting
+      expect(turn4.state.selectedService).toBe('srv-web-2')
+      expect(turn4.state.selectedServiceName).toBe('Website & Web Application Development')
+      expect(turn4.text).toContain('My apologies for the confusion')
+      expect(turn4.text).toContain('Website & Web Application Development')
+      // Must NOT restart Stage B introduction greeting
+      expect(turn4.text).not.toContain('Great choice! Thanks for your interest in our Website & Web Application Development services')
+      // Must continue scheduling/consultation workflow
+      expect(turn4.text).toContain('consultation')
+    })
   })
 })
+
 

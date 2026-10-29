@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import { Plus, Trash2 } from "lucide-react";
+import { useState, useEffect } from "react";
+import { Plus, Trash2, Sparkles } from "lucide-react";
 import { useTranslations } from "next-intl";
 
 import { Button } from "@/components/ui/button";
@@ -59,6 +59,8 @@ interface InteractiveBuilderProps {
   onChange: (payload: InteractiveMessagePayload) => void;
   /** Show the live WhatsApp-style preview beside the form. Default true. */
   showPreview?: boolean;
+  /** Optional service catalog from AI Agent settings to allow 1-click import */
+  catalogServices?: { id: string; name: string; description?: string }[];
 }
 
 /**
@@ -72,10 +74,74 @@ export function InteractiveBuilder({
   value,
   onChange,
   showPreview = true,
+  catalogServices,
 }: InteractiveBuilderProps) {
   const t = useTranslations("Interactive");
   const [advanced, setAdvanced] = useState(false);
   const validation = validateInteractivePayload(value);
+
+  const [fetchedServices, setFetchedServices] = useState<{ id: string; name: string; description?: string }[]>([]);
+
+  useEffect(() => {
+    if (catalogServices && catalogServices.length > 0) {
+      return;
+    }
+    let active = true;
+    fetch("/api/ai/config")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!active || !data) return;
+        const profile = data.business_profile;
+        if (profile?.services && Array.isArray(profile.services) && profile.services.length > 0) {
+          setFetchedServices(profile.services);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [catalogServices]);
+
+  const availableServices = (catalogServices && catalogServices.length > 0) ? catalogServices : fetchedServices;
+
+  const handleImportFromCatalog = () => {
+    if (availableServices.length === 0) return;
+    const bodyText = value.body || "Which service are you interested in? Please select an option below.";
+    const headerText = value.header || "Our Services";
+    const footerText = value.footer || "Select an option to continue.";
+
+    if (value.kind === "buttons") {
+      const btns = availableServices.slice(0, 3).map((s) => ({
+        id: s.id,
+        title: s.name.length > 20 ? s.name.slice(0, 20).trim() : s.name,
+      }));
+      onChange({
+        ...value,
+        header: headerText,
+        body: bodyText,
+        footer: footerText,
+        buttons: btns,
+      });
+    } else {
+      const rows = availableServices.slice(0, 10).map((s) => ({
+        id: s.id,
+        title: s.name.length > 24 ? s.name.slice(0, 24).trim() : s.name,
+        description: s.description
+          ? s.description.length > 72
+            ? s.description.slice(0, 69) + "..."
+            : s.description
+          : undefined,
+      }));
+      onChange({
+        ...value,
+        header: headerText,
+        body: bodyText,
+        footer: footerText,
+        button_label: value.button_label || "View Services",
+        sections: [{ title: "Available Services", rows }],
+      });
+    }
+  };
 
   const setField = (patch: Partial<InteractiveMessagePayload>) =>
     onChange({ ...value, ...patch } as InteractiveMessagePayload);
@@ -101,18 +167,33 @@ export function InteractiveBuilder({
     <div className="@container">
       <div className="flex flex-col gap-4 @2xl:flex-row">
         <div className="flex min-w-0 flex-1 flex-col gap-3">
-          {/* Kind toggle */}
-          <div className="flex gap-2">
-            <KindButton
-              active={value.kind === "buttons"}
-              label={t("replyButtons")}
-              onClick={() => switchKind("buttons")}
-            />
-            <KindButton
-              active={value.kind === "list"}
-              label={t("list")}
-              onClick={() => switchKind("list")}
-            />
+          {/* Kind toggle and Catalog Import */}
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex gap-2">
+              <KindButton
+                active={value.kind === "buttons"}
+                label={t("replyButtons")}
+                onClick={() => switchKind("buttons")}
+              />
+              <KindButton
+                active={value.kind === "list"}
+                label={t("list")}
+                onClick={() => switchKind("list")}
+              />
+            </div>
+            {availableServices.length > 0 && (
+              <Button
+                variant="outline"
+                size="sm"
+                type="button"
+                onClick={handleImportFromCatalog}
+                className="h-8 text-xs flex items-center gap-1.5 text-primary border-primary/30 hover:bg-primary/5 transition-colors"
+                title="Populate with services configured in AI Agent Business Profile"
+              >
+                <Sparkles className="h-3.5 w-3.5 text-primary" />
+                <span>Import from AI Catalog ({availableServices.length})</span>
+              </Button>
+            )}
           </div>
 
           <Field label={t("body")} counter={`${value.body.length}/${INTERACTIVE_LIMITS.bodyMaxLength}`}>

@@ -104,7 +104,7 @@ export async function loadAiConfig(
   let conversationFlow = row.conversation_flow ?? null
   let messageTemplates = row.message_templates ?? null
 
-  if (!businessProfile || !conversationFlow || !messageTemplates) {
+  if (!businessProfile || !businessProfile.services || businessProfile.services.length === 0 || !conversationFlow || !messageTemplates) {
     try {
       const { data: acc } = await db
         .from('accounts')

@@ -589,4 +589,182 @@ describe('Deterministic Conversation Flow Manager', () => {
       expect(resultTurn3.text).toBeTruthy()
     })
   })
+
+  describe('Authoritative Service Catalog & Handover Acceptance', () => {
+    const configuredServices = [
+      {
+        id: 'srv-ai-1',
+        name: 'AI & Business Automation',
+        description:
+          'AI agents, WhatsApp automation, automated customer support, lead qualification, CRM workflows, and appointment scheduling',
+        benefits: ['Reduce repetitive manual work', 'respond to leads faster'],
+        keywords: ['ai', 'automation', 'bot', 'agent'],
+      },
+      {
+        id: 'srv-web-2',
+        name: 'Website & Web Application Development',
+        description: 'Business websites, landing pages, custom web applications, and ongoing maintenance',
+        benefits: ['Establish a professional online presence', 'improve customer enquiries'],
+        keywords: ['web', 'website', 'app'],
+      },
+    ]
+
+    const tenantConfig: AiConfig = {
+      ...baseConfig,
+      businessProfile: {
+        ...DEFAULT_AI_BUSINESS_PROFILE,
+        businessName: 'Opsiys Automation Labs',
+        services: configuredServices,
+      },
+    }
+
+    it('purges obsolete or stale default service (e.g. srv-1 / General Consultation) when deserializing from DB', async () => {
+      // Stale record simulated from old default fallback
+      const staleQualificationRow = {
+        id: 'qual-stale-1',
+        account_id: 'acct-custom-tenant',
+        contact_id: 'contact-test',
+        conversation_id: 'conv-test-1',
+        state: 'LEAD_QUALIFIED',
+        requested_service: 'General Consultation & Services',
+        qualification_notes:
+          'Service: General Consultation & Services | Stage: STAGE_B_ACKNOWLEDGE_SERVICE\n---\n{"currentFlow":"service_to_conversion","currentStage":"STAGE_B_ACKNOWLEDGE_SERVICE","servicesIdentified":["General Consultation & Services"],"selectedService":"srv-1","selectedServiceName":"General Consultation & Services","informationCollected":{},"optionsOffered":["1. Explore pricing","2. Book a consultation"],"benefitsExplained":true}',
+      }
+
+      const db = createMockSupabase(staleQualificationRow)
+
+      const result = await processConversationFlow({
+        db,
+        accountId: 'acct-custom-tenant',
+        conversationId: 'conv-test-1',
+        contactId: 'contact-test',
+        messages: [{ role: 'user', content: 'AI & Automation' }],
+        config: tenantConfig,
+        contactName: 'Sarah',
+      })
+
+      // Must purge General Consultation and cleanly adopt AI & Business Automation
+      expect(result.state.selectedService).toBe('srv-ai-1')
+      expect(result.state.selectedServiceName).toBe('AI & Business Automation')
+      expect(result.text).not.toContain('General Consultation')
+      expect(result.text).toContain('AI & Business Automation')
+      expect(result.text).toContain('What are you looking to automate in your business right now?')
+    })
+
+    it('customer selects AI & Automation: acknowledges configured service details and asks consultative goal question', async () => {
+      const db = createMockSupabase(null)
+
+      const result = await processConversationFlow({
+        db,
+        accountId: 'acct-custom-tenant',
+        conversationId: 'conv-test-2',
+        contactId: 'contact-test',
+        messages: [{ role: 'user', content: 'AI & Automation' }],
+        config: tenantConfig,
+        contactName: 'Michael',
+      })
+
+      expect(result.handoff).toBe(false)
+      expect(result.state.selectedService).toBe('srv-ai-1')
+      expect(result.state.selectedServiceName).toBe('AI & Business Automation')
+      expect(result.text).toContain('Thanks for your interest in our AI & Business Automation services')
+      expect(result.text).toContain('What are you looking to automate in your business right now?')
+      expect(result.text).toContain('1. Explore pricing')
+      expect(result.text).toContain('2. Book a consultation')
+      expect(result.text).not.toContain('General Consultation')
+    })
+
+    it('customer specifies high traffic requirement: retains service and records requirement for LLM follow-up', async () => {
+      // Step 1: Customer selected service
+      const db = createMockSupabase(null)
+
+      const turn1 = await processConversationFlow({
+        db,
+        accountId: 'acct-custom-tenant',
+        conversationId: 'conv-test-3',
+        contactId: 'contact-test',
+        messages: [{ role: 'user', content: 'AI & Automation' }],
+        config: tenantConfig,
+        contactName: 'David',
+      })
+
+      // Step 2: Customer responds "I want to handle high traffic"
+      const turn2 = await processConversationFlow({
+        db,
+        accountId: 'acct-custom-tenant',
+        conversationId: 'conv-test-3',
+        contactId: 'contact-test',
+        messages: [
+          { role: 'user', content: 'AI & Automation' },
+          { role: 'assistant', content: turn1.text },
+          { role: 'user', content: 'I want to handle high traffic' },
+        ],
+        config: tenantConfig,
+        contactName: 'David',
+      })
+
+      expect(turn2.handoff).toBe(false)
+      expect(turn2.state.selectedService).toBe('srv-ai-1')
+      expect(turn2.state.selectedServiceName).toBe('AI & Business Automation')
+      expect(turn2.state.informationCollected['requirements']).toContain('I want to handle high traffic')
+      expect(turn2.text).not.toContain('General Consultation')
+      expect(turn2.text).not.toContain('1. AI & Business Automation\n2. Website & Web Application')
+    })
+
+    it('handles customer service transition when customer switches interest', async () => {
+      const db = createMockSupabase(null)
+
+      // Turn 1: Customer chose AI & Automation
+      const turn1 = await processConversationFlow({
+        db,
+        accountId: 'acct-custom-tenant',
+        conversationId: 'conv-test-4',
+        contactId: 'contact-test',
+        messages: [{ role: 'user', content: 'AI & Automation' }],
+        config: tenantConfig,
+      })
+      expect(turn1.state.selectedServiceName).toBe('AI & Business Automation')
+
+      // Turn 2: Customer changes their mind and asks about Web Development
+      const turn2 = await processConversationFlow({
+        db,
+        accountId: 'acct-custom-tenant',
+        conversationId: 'conv-test-4',
+        contactId: 'contact-test',
+        messages: [
+          { role: 'user', content: 'AI & Automation' },
+          { role: 'assistant', content: turn1.text },
+          { role: 'user', content: 'Actually tell me about your Web Development' },
+        ],
+        config: tenantConfig,
+      })
+
+      expect(turn2.state.selectedService).toBe('srv-web-2')
+      expect(turn2.state.selectedServiceName).toBe('Website & Web Application Development')
+      expect(turn2.text).toContain('Website & Web Application Development')
+    })
+
+    it('does not silently substitute default service on unmapped service attempt; asks for clarification', async () => {
+      const db = createMockSupabase(null)
+
+      const result = await processConversationFlow({
+        db,
+        accountId: 'acct-custom-tenant',
+        conversationId: 'conv-test-5',
+        contactId: 'contact-test',
+        messages: [
+          { role: 'assistant', content: 'Which service are you interested in? Please select an option.' },
+          { role: 'user', content: 'btn_unmapped_unknown' },
+        ],
+        config: tenantConfig,
+      })
+
+      expect(result.state.selectedService).toBeNull()
+      expect(result.text).not.toContain('General Consultation')
+      expect(result.text).toContain('To make sure I get you the right information, which of our services are you interested in?')
+      expect(result.text).toContain('1. AI & Business Automation')
+      expect(result.text).toContain('2. Website & Web Application Development')
+    })
+  })
 })
+

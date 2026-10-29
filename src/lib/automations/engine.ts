@@ -1109,11 +1109,10 @@ async function runStep(step: AutomationStep, args: ExecuteArgs): Promise<string>
       const tapId = args.context.interactive_reply_id
       const msgText = args.context.message_text || ''
 
-      // Prefer message_text (e.g. human-readable button title "AI & Automation")
-      // then fall back to tapId (e.g. "btn_1" or service ID)
+      // Prefer tapId if it directly matches a service ID in catalog, then msgText (button title)
       const matched =
-        (msgText ? matchServiceFromCatalog(msgText, profile.services) : null) ||
-        (tapId ? matchServiceFromCatalog(tapId, profile.services) : null)
+        (tapId ? matchServiceFromCatalog(tapId, profile.services) : null) ||
+        (msgText ? matchServiceFromCatalog(msgText, profile.services) : null)
 
       const qual = await loadOrCreateQualification(
         db,
@@ -1135,6 +1134,22 @@ async function runStep(step: AutomationStep, args: ExecuteArgs): Promise<string>
         flowState.consultationRequested = false
         flowState.pricingDiscussed = false
         flowState.pendingBooking = {}
+        flowState.currentStage = 'STAGE_B_ACKNOWLEDGE_SERVICE'
+      } else {
+        // Purge any stale non-catalog service from obsolete sessions
+        if (flowState.selectedService) {
+          const stillValid = profile.services.some((s) => s.id === flowState.selectedService)
+          if (!stillValid) {
+            flowState.selectedService = null
+            flowState.selectedServiceName = null
+            flowState.benefitsExplained = false
+          }
+        }
+        console.info('[engine handover_to_ai] service selection unmapped in catalog:', {
+          accountId: args.automation.account_id,
+          hasTapId: Boolean(tapId),
+          msgLength: msgText.length,
+        })
       }
       if (cfg.instruction) {
         flowState.informationCollected['automation_instruction'] = cfg.instruction

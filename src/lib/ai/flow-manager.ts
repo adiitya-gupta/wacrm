@@ -73,7 +73,12 @@ export function resolveEffectiveBusinessProfile(
   config: AiConfig,
   accountId: string,
 ): AiBusinessProfile {
-  if (config.businessProfile && config.businessProfile.businessName) {
+  if (
+    config.businessProfile &&
+    config.businessProfile.businessName &&
+    config.businessProfile.services &&
+    config.businessProfile.services.length > 0
+  ) {
     return config.businessProfile
   }
   const opsiysId = process.env.OPSIYS_ACCOUNT_ID?.trim()
@@ -142,7 +147,7 @@ export function matchServiceFromCatalog(
     }
   }
 
-  // 2. Keyword match
+  // 2. Keyword match (with word boundaries to avoid substring false-positives like 'unmapped' matching 'app')
   for (const s of services) {
     if (s.keywords && s.keywords.length > 0) {
       for (const kw of s.keywords) {
@@ -150,7 +155,8 @@ export function matchServiceFromCatalog(
         if (kwLower === 'email' && isStatingEmail && !hasEmailServiceIntent) {
           continue
         }
-        if (lower.includes(kwLower) || kwLower.includes(lower)) {
+        const kwRegex = new RegExp(`(^|[^a-z0-9])${kwLower.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&')}([^a-z0-9]|$)`, 'i')
+        if (kwRegex.test(lower)) {
           return s
         }
       }
@@ -283,6 +289,31 @@ export async function processConversationFlow(
     qualificationRecord,
     flowConfig.preset,
   )
+
+  // Synchronize state.selectedService and state.selectedServiceName with the tenant's authoritative catalog.
+  // Purge any stale or obsolete service (e.g. from an old fallback 'General Consultation & Services' or previous test)
+  if (state.selectedService || state.selectedServiceName) {
+    const authoritative = profile.services.find(
+      (s) =>
+        (state.selectedService && s.id === state.selectedService) ||
+        (state.selectedServiceName && s.name.toLowerCase() === state.selectedServiceName.toLowerCase()),
+    )
+    if (authoritative) {
+      state.selectedService = authoritative.id
+      state.selectedServiceName = authoritative.name
+    } else {
+      console.info('[flow-manager] purged obsolete non-catalog service from state:', {
+        accountId,
+        staleId: state.selectedService,
+        staleName: state.selectedServiceName,
+      })
+      state.selectedService = null
+      state.selectedServiceName = null
+      state.benefitsExplained = false
+      state.optionsOffered = []
+      state.selectedOption = null
+    }
+  }
 
   const lastUserTurn = [...messages].reverse().find((m) => m.role === 'user')
   const userText = (lastUserTurn?.content || '').trim()
@@ -577,12 +608,42 @@ export async function processConversationFlow(
   // 6. Service Identification & Catalog Matching
   const matchedService = matchServiceFromCatalog(userText, profile.services)
   if (matchedService) {
-    if (!state.selectedService) {
+    if (!state.selectedService || state.selectedService !== matchedService.id) {
       state.selectedService = matchedService.id
       state.selectedServiceName = matchedService.name
       if (!state.servicesIdentified.includes(matchedService.name)) {
         state.servicesIdentified.push(matchedService.name)
       }
+      state.benefitsExplained = false
+      state.discoveryQuestionsAsked = 0
+      state.pricingRequested = false
+      state.consultationRequested = false
+      state.pricingDiscussed = false
+      state.pendingBooking = {}
+      state.currentStage = 'STAGE_B_ACKNOWLEDGE_SERVICE'
+    }
+  }
+
+  // If customer attempted to select a service or tapped a button, but it could not be resolved against tenant catalog:
+  const isServiceSelectionAttempt =
+    priorAssistantText.includes('which of our core services') ||
+    priorAssistantText.includes('which service are you interested in') ||
+    priorAssistantText.includes('select an option') ||
+    lowerUserText.includes('service') ||
+    lowerUserText.startsWith('btn_')
+
+  if (isServiceSelectionAttempt && !matchedService && !state.selectedService) {
+    console.info('[flow-manager] service resolution unresolvable against catalog:', {
+      accountId,
+      inputLength: userText.length,
+      availableServicesCount: profile.services.length,
+    })
+    const serviceList = profile.services.map((s, i) => `${i + 1}. ${s.name}`).join('\n')
+    return {
+      text: `Thanks for reaching out! To make sure I get you the right information, which of our services are you interested in?\n\n${serviceList}\n\nOr feel free to tell me what you're looking to achieve, or ask about pricing!`,
+      handoff: false,
+      state,
+      leadSummary: buildLeadSummary(state, profile),
     }
   }
 
@@ -669,27 +730,49 @@ export async function processConversationFlow(
   }
 
   // Rule: If customer just identified a service (or service is selected and benefits not yet explained):
-  // STAGE B: Acknowledge Selected Service + Compliment + Grounded Benefit + EXACTLY 2 OPTIONS (Explore pricing / Book consultation)
+  // STAGE B: Acknowledge Selected Service + Grounded Capabilities/Benefits + Consultative Goal Discovery Question
   if (state.selectedService && !state.benefitsExplained && state.currentStage !== 'MEETING_BOOKED') {
     state.currentStage = 'STAGE_B_ACKNOWLEDGE_SERVICE'
     state.benefitsExplained = true
     state.optionsOffered = ['1. Explore pricing', '2. Book a consultation']
 
     const serviceObj = profile.services.find((s) => s.id === state.selectedService)
-    const benefitText =
-      serviceObj && serviceObj.benefits && serviceObj.benefits.length > 0
-        ? serviceObj.benefits.join(' and ')
-        : 'save time, streamline your processes, and achieve consistent results'
+    const serviceName = serviceObj?.name || state.selectedServiceName || 'our services'
 
-    const reply = renderTemplate(
-      getEffectiveTemplate(templates, 'service_acknowledgement'),
-      {
-        business_name: profile.businessName,
-        customer_name: contactName || 'there',
-        service_name: state.selectedServiceName || 'Automation',
-        service_benefits: benefitText,
-      },
-    )
+    let reply: string
+    if (
+      templates.service_acknowledgement &&
+      templates.service_acknowledgement !== DEFAULT_AI_MESSAGE_TEMPLATES.service_acknowledgement
+    ) {
+      const benefitText =
+        serviceObj && serviceObj.benefits && serviceObj.benefits.length > 0
+          ? serviceObj.benefits.join(' and ')
+          : 'save time, streamline your processes, and achieve consistent results'
+      reply = renderTemplate(
+        getEffectiveTemplate(templates, 'service_acknowledgement'),
+        {
+          business_name: profile.businessName,
+          customer_name: contactName || 'there',
+          service_name: serviceName,
+          service_benefits: benefitText,
+        },
+      )
+    } else {
+      const desc = serviceObj?.description
+        ? ` We help businesses ${serviceObj.description.toLowerCase().replace(/^(we help |we provide |tailored to )/i, '')}.`
+        : serviceObj?.benefits && serviceObj.benefits.length > 0
+          ? ` We help you ${serviceObj.benefits.join(' and ')}.`
+          : ''
+      const goalVerb = /automation|bot|ai/i.test(serviceName)
+        ? 'automate'
+        : /web|develop|design|app/i.test(serviceName)
+          ? 'build'
+          : /marketing|seo|growth|lead/i.test(serviceName)
+            ? 'grow'
+            : 'achieve'
+
+      reply = `Great choice! Thanks for your interest in our ${serviceName} services.${desc}\n\nWhat are you looking to ${goalVerb} in your business right now?\n1. Explore pricing\n2. Book a consultation`
+    }
 
     await persistFlowState(db, qualificationRecord.id, state, 'REQUIREMENT_DISCOVERY')
 
@@ -1105,15 +1188,25 @@ function buildFlowSystemPrompt(args: {
   ]
 
   if (state.selectedServiceName) {
+    const serviceObj = profile.services.find(
+      (s) =>
+        s.name.toLowerCase() === state.selectedServiceName!.toLowerCase() ||
+        s.id === state.selectedService,
+    )
     parts.push(
       '',
       `## CURRENT SELECTED SERVICE CONTEXT:`,
-      `- The customer has already selected: "${state.selectedServiceName}".`,
+      `- The customer has selected: "${state.selectedServiceName}".`,
+      serviceObj?.description ? `- Configured Service Scope: ${serviceObj.description}` : '',
+      serviceObj?.benefits?.length ? `- Configured Benefits: ${serviceObj.benefits.join(', ')}` : '',
       state.informationCollected['requirements']
         ? `- Customer stated requirements: "${state.informationCollected['requirements']}".`
         : '',
-      `- CRITICAL: DO NOT ask them to choose or list services again. DO NOT output a catalog or menu of all services.`,
-      `- Acknowledge their requirement in the context of ${state.selectedServiceName}, and ask exactly ONE relevant follow-up question (such as expected message volume, peak traffic, current tools/stack, or specific business use case) to understand their setup.`,
+      `- CRITICAL RULES:`,
+      `  1. DO NOT ask them to choose or list services again. DO NOT output a catalog or menu of all services.`,
+      `  2. DO NOT replace or substitute "${state.selectedServiceName}" with any other service or general consultation.`,
+      `  3. Acknowledge their requirement in the context of ${state.selectedServiceName}, explain relevant configured capabilities and benefits, and ask exactly ONE relevant follow-up question (such as expected message volume, peak traffic, current systems/tools, or specific business use case) to understand their setup.`,
+      `  4. If they ask about pricing or quote, explain that pricing depends on scope and workflow requirements, reference any configured pricing rules, and offer a consultation.`,
     )
   }
 

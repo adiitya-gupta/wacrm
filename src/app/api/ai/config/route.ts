@@ -264,9 +264,9 @@ export async function POST(request: Request) {
     }
 
     // Only spend a provider round-trip when credentials that affect
-    // reachability actually changed. If credentials did not change, we avoid
-    // unnecessary provider calls and avoid failing if the stored encrypted key
-    // cannot be decrypted during a non-credential save.
+    // reachability actually changed AND AI is active/being enabled or a new key was entered.
+    // This allows business profile and prompt updates without requiring an external provider call.
+    const isEnablingOrActive = isActive || autoReplyEnabled
     const credentialsChanged =
       !existing ||
       rawKey !== '' ||
@@ -274,8 +274,11 @@ export async function POST(request: Request) {
       model !== existing.model ||
       baseUrl !== (existing.base_url ?? null)
 
+    const shouldValidateCredentials =
+      (isEnablingOrActive || rawKey !== '') && credentialsChanged
+
     let apiKeyPlain: string
-    if (credentialsChanged) {
+    if (shouldValidateCredentials) {
       if (rawKey) {
         apiKeyPlain = rawKey
       } else if (existing?.api_key && canReuseStoredAiKey(existing, provider, baseUrl)) {

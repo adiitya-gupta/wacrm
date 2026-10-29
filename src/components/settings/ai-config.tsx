@@ -221,22 +221,30 @@ export function AiConfig() {
           ...DEFAULT_AI_BUSINESS_PROFILE,
           ...data.business_profile,
         };
-        setBusinessProfile(loadedBusinessProfile);
+      } else {
+        loadedBusinessProfile = DEFAULT_AI_BUSINESS_PROFILE;
       }
+      setBusinessProfile(loadedBusinessProfile);
+
       if (data.conversation_flow && typeof data.conversation_flow === 'object') {
         loadedConversationFlow = {
           ...DEFAULT_AI_CONVERSATION_FLOW,
           ...data.conversation_flow,
         };
-        setConversationFlow(loadedConversationFlow);
+      } else {
+        loadedConversationFlow = DEFAULT_AI_CONVERSATION_FLOW;
       }
+      setConversationFlow(loadedConversationFlow);
+
       if (data.message_templates && typeof data.message_templates === 'object') {
         loadedMessageTemplates = {
           ...DEFAULT_AI_MESSAGE_TEMPLATES,
           ...data.message_templates,
         };
-        setMessageTemplates(loadedMessageTemplates);
+      } else {
+        loadedMessageTemplates = DEFAULT_AI_MESSAGE_TEMPLATES;
       }
+      setMessageTemplates(loadedMessageTemplates);
 
       // Initialize saved snapshot
       savedSnapshotRef.current = JSON.stringify({

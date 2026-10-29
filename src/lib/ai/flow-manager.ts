@@ -110,19 +110,36 @@ export function resolveEffectiveBusinessProfile(
   config: AiConfig,
   accountId: string,
 ): AiBusinessProfile {
+  const opsiysId = process.env.OPSIYS_ACCOUNT_ID?.trim()
+  const defaultProfile =
+    opsiysId && accountId === opsiysId
+      ? OPSIYS_DEFAULT_BUSINESS_PROFILE
+      : DEFAULT_AI_BUSINESS_PROFILE
+
   if (
     config.businessProfile &&
-    config.businessProfile.businessName &&
-    config.businessProfile.services &&
-    config.businessProfile.services.length > 0
+    (config.businessProfile.businessName ||
+      (config.businessProfile.services && config.businessProfile.services.length > 0))
   ) {
-    return config.businessProfile
+    return {
+      ...defaultProfile,
+      ...config.businessProfile,
+      services:
+        config.businessProfile.services && config.businessProfile.services.length > 0
+          ? config.businessProfile.services
+          : defaultProfile.services,
+      pricingPackages:
+        config.businessProfile.pricingPackages && config.businessProfile.pricingPackages.length > 0
+          ? config.businessProfile.pricingPackages
+          : defaultProfile.pricingPackages,
+      pricingRules:
+        config.businessProfile.pricingRules && config.businessProfile.pricingRules.length > 0
+          ? config.businessProfile.pricingRules
+          : defaultProfile.pricingRules,
+    }
   }
-  const opsiysId = process.env.OPSIYS_ACCOUNT_ID?.trim()
-  if (opsiysId && accountId === opsiysId) {
-    return OPSIYS_DEFAULT_BUSINESS_PROFILE
-  }
-  return DEFAULT_AI_BUSINESS_PROFILE
+
+  return defaultProfile
 }
 
 /**

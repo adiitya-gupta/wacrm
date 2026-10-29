@@ -112,8 +112,17 @@ export async function loadAiConfig(
         .eq('id', accountId)
         .maybeSingle()
       const meta = (acc?.metadata as Record<string, unknown>) ?? {}
-      if (!businessProfile && meta.ai_business_profile) {
-        businessProfile = meta.ai_business_profile as AiBusinessProfile
+      if (meta.ai_business_profile) {
+        const metaProfile = meta.ai_business_profile as AiBusinessProfile
+        if (!businessProfile) {
+          businessProfile = metaProfile
+        } else if ((!businessProfile.services || businessProfile.services.length === 0) && metaProfile.services && metaProfile.services.length > 0) {
+          businessProfile = {
+            ...metaProfile,
+            ...businessProfile,
+            services: metaProfile.services,
+          }
+        }
       }
       if (!conversationFlow && meta.ai_conversation_flow) {
         conversationFlow = meta.ai_conversation_flow as AiConversationFlowConfig

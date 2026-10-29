@@ -36,7 +36,6 @@ import {
   persistFlowState,
 } from '@/lib/ai/flow-manager'
 import { dispatchInboundToAiReply } from '@/lib/ai/auto-reply'
-import type { ServiceItem } from '@/lib/ai/types'
 
 /** Step errors land in automation_logs and are shown on the logs page. */
 const tErr = getT('LibErrors.engine')

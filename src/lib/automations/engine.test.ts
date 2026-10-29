@@ -1,10 +1,19 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
+interface MockAiConfig {
+  isActive?: boolean;
+  autoReplyEnabled?: boolean;
+  autoReplyMaxPerConversation?: number;
+  businessProfile?: unknown;
+  conversationFlow?: unknown;
+  [key: string]: unknown;
+}
+
 // Shared mock state for the service-role client. Lives in a hoisted block
 // so the vi.mock factory below can close over it.
 const h = vi.hoisted(() => ({
   dispatchInboundToAiReply: vi.fn(async () => {}),
-  loadAiConfig: vi.fn(async (): Promise<any> => null),
+  loadAiConfig: vi.fn(async (): Promise<MockAiConfig | null> => null),
   state: {
     owned: null as { id: string } | null,
     ownedCustomField: null as { id: string } | null,

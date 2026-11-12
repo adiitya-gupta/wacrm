@@ -226,10 +226,15 @@ export interface GenerateResult {
 export class AiError extends Error {
   readonly code: string
   readonly status: number
-  constructor(message: string, opts: { code?: string; status?: number } = {}) {
+  readonly upstreamStatus?: number
+  constructor(
+    message: string,
+    opts: { code?: string; status?: number; upstreamStatus?: number } = {},
+  ) {
     super(message)
     this.name = 'AiError'
     this.code = opts.code ?? 'ai_error'
     this.status = opts.status ?? 502
+    this.upstreamStatus = opts.upstreamStatus
   }
 }

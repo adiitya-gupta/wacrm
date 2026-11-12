@@ -104,8 +104,28 @@ export async function POST(request: Request) {
       })
     } catch (err) {
       if (err instanceof AiError) {
+        let endpointHost: string | null = null
+        if (baseUrl) {
+          try {
+            endpointHost = new URL(baseUrl).host
+          } catch {
+            endpointHost = null
+          }
+        }
+        console.warn('[ai/test] provider validation rejected:', {
+          provider,
+          model,
+          endpointHost,
+          code: err.code,
+          upstreamStatus: err.upstreamStatus ?? null,
+          message: err.message,
+        })
         return NextResponse.json(
-          { error: err.message, code: err.code },
+          {
+            error: err.message,
+            code: err.code,
+            ...(err.upstreamStatus ? { upstreamStatus: err.upstreamStatus } : {}),
+          },
           { status: 400 },
         )
       }

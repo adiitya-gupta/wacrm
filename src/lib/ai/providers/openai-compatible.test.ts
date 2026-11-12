@@ -179,5 +179,82 @@ describe('generateOpenAiCompatible', () => {
     })
 
     expect(result.text).toBe('Cloudflare AI answer')
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('https://api.cloudflare.com/client/v4/accounts/acct-123/ai/run/@cf/meta/llama-3.1-8b-instruct')
+    expect(init.headers.Authorization).toBe('Bearer test-token')
+    const sentBody = JSON.parse(init.body)
+    expect(sentBody).not.toHaveProperty('model')
+    expect(sentBody.messages).toEqual([
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'Hello' },
+    ])
+  })
+
+  it('appends model path when baseUrl ends at /ai/run without model slug', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          result: { response: 'Cloudflare native reply' },
+          success: true,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await generateOpenAiCompatible({
+      apiKey: 'test-token',
+      model: '@cf/meta/llama-3.1-8b-instruct',
+      systemPrompt: 'sys',
+      messages: [{ role: 'user', content: 'ping' }],
+      timeoutMs: 1000,
+      baseUrl: 'https://api.cloudflare.com/client/v4/accounts/acct-123/ai/run',
+    })
+
+    expect(result.text).toBe('Cloudflare native reply')
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      'https://api.cloudflare.com/client/v4/accounts/acct-123/ai/run/@cf/meta/llama-3.1-8b-instruct',
+    )
+  })
+
+  it('captures Cloudflare errors[] array, HTTP 401/403 status, and permission hint without exposing token', async () => {
+    const secretToken = 'cf_super_secret_token_value'
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          result: null,
+          success: false,
+          errors: [{ code: 10000, message: 'Authentication error' }],
+          messages: [],
+        }),
+        { status: 403, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    let caught: unknown
+    try {
+      await generateOpenAiCompatible({
+        apiKey: secretToken,
+        model: '@cf/meta/llama-3.1-8b-instruct',
+        systemPrompt: 'sys',
+        messages: [{ role: 'user', content: 'ping' }],
+        timeoutMs: 1000,
+        baseUrl: 'https://api.cloudflare.com/client/v4/accounts/acct-123/ai/run/@cf/meta/llama-3.1-8b-instruct',
+      })
+    } catch (err) {
+      caught = err
+    }
+
+    expect(caught).toMatchObject({
+      code: 'invalid_key',
+      status: 401,
+      upstreamStatus: 403,
+    })
+    const msg = (caught as Error).message
+    expect(msg).toContain('HTTP 403')
+    expect(msg).toContain('Authentication error (code 10000)')
+    expect(msg).toContain('Workers AI: Read + Edit')
+    expect(msg).not.toContain(secretToken)
   })
 })

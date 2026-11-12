@@ -97,7 +97,12 @@ export async function generateOpenAiCompatible(
   args: ProviderArgs,
 ): Promise<ProviderResult> {
   const { apiKey, model, systemPrompt, messages, timeoutMs, baseUrl } = args
-  const endpoint = normalizeOpenAiCompatibleBaseUrl(baseUrl ?? '')
+  const normalizedBase = normalizeOpenAiCompatibleBaseUrl(baseUrl ?? '')
+  const isCloudflareRun = normalizedBase.includes('/ai/run')
+  const endpoint =
+    normalizedBase.endsWith('/ai/run') && model.trim()
+      ? `${normalizedBase}/${model.trim().replace(/^\/+/, '')}`
+      : normalizedBase
 
   let deliverable = false
   try {
@@ -115,6 +120,21 @@ export async function generateOpenAiCompatible(
     })
   }
 
+  const normalizedMessages = [
+    { role: 'system', content: systemPrompt },
+    ...mergeConsecutive(messages),
+  ]
+  const payload = isCloudflareRun
+    ? {
+        messages: normalizedMessages,
+        max_tokens: MAX_OUTPUT_TOKENS,
+      }
+    : {
+        model,
+        messages: normalizedMessages,
+        max_tokens: MAX_OUTPUT_TOKENS,
+      }
+
   let res: Response
   try {
     res = await fetch(endpoint, {
@@ -124,11 +144,7 @@ export async function generateOpenAiCompatible(
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: 'system', content: systemPrompt }, ...mergeConsecutive(messages)],
-        max_tokens: MAX_OUTPUT_TOKENS,
-      }),
+      body: JSON.stringify(payload),
       signal: AbortSignal.timeout(timeoutMs),
     })
   } catch (err) {

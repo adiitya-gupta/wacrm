@@ -1,11 +1,17 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { BookingResult, Meeting } from '@/types/meetings';
-import { loadSchedulingSettings } from './availability';
+import {
+  loadSchedulingSettings,
+  isSlotWithinWorkingHours,
+  isSlotAvailable,
+  hasConflict,
+} from './availability';
 import {
   createGoogleCalendarEvent,
+  updateGoogleCalendarEvent,
   deleteGoogleCalendarEvent,
-  decryptGoogleTokens,
-  getValidAccessToken,
+  getValidAccessTokenForAccount,
+  queryGoogleBusyPeriods,
 } from './google-calendar';
 
 export interface BookMeetingArgs {
@@ -23,6 +29,7 @@ export interface BookMeetingArgs {
   idempotencyKey?: string;
   attendeeEmail?: string;
   attendeeName?: string;
+  referenceDate?: Date;
 }
 
 export interface RescheduleMeetingArgs {
@@ -32,12 +39,22 @@ export interface RescheduleMeetingArgs {
   newEndTime?: Date | string;
   timezone?: string;
   rescheduleReason?: string;
+  referenceDate?: Date;
 }
 
 export interface CancelMeetingArgs {
   meetingId: string;
   accountId: string;
   reason?: string;
+}
+
+async function resolveTokenDb(fallbackDb: SupabaseClient): Promise<SupabaseClient> {
+  try {
+    const { supabaseAdmin } = await import('@/lib/ai/admin-client');
+    return supabaseAdmin();
+  } catch {
+    return fallbackDb;
+  }
 }
 
 /**
@@ -61,6 +78,7 @@ export async function bookMeeting(
     idempotencyKey,
     attendeeEmail,
     attendeeName,
+    referenceDate,
   } = args;
 
   const settings = await loadSchedulingSettings(db, accountId);
@@ -75,10 +93,75 @@ export async function bookMeeting(
     end = new Date(start.getTime() + settings.meeting_duration_minutes * 60 * 1000);
   }
 
-  // Pre-generate default meeting link if native
-  const nativeMeetingLink =
-    settings.default_meeting_link ||
-    `https://meet.google.com/meet-${Math.random().toString(36).substring(2, 6)}-${Math.random().toString(36).substring(2, 5)}`;
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start) {
+    return {
+      success: false,
+      error: 'INVALID_TIME_RANGE',
+      message: 'The requested meeting start and end times are invalid.',
+    };
+  }
+
+  // 0. Pre-validate: slot cannot be in the past
+  const now = referenceDate || new Date();
+  if (start.getTime() <= now.getTime()) {
+    return {
+      success: false,
+      error: 'SLOT_IN_PAST',
+      message: 'The requested time slot has already passed. Please select a future time slot.',
+    };
+  }
+
+  // 0b. Pre-validate: slot must fit within configured working hours
+  const durationMinutes = Math.max(1, Math.round((end.getTime() - start.getTime()) / 60000));
+  if (!isSlotWithinWorkingHours(start, durationMinutes, settings)) {
+    return {
+      success: false,
+      error: 'OUTSIDE_WORKING_HOURS',
+      message: 'The requested time slot falls outside configured working hours.',
+    };
+  }
+
+  // 0c. Pre-validate Google Calendar conflict if connected & reachable
+  const calendarId = settings.google_calendar_calendar_id || 'primary';
+  let prefetchedToken: string | null = null;
+  let tokenLookupFailed = false;
+
+  if (settings.google_calendar_enabled) {
+    const tokenDb = await resolveTokenDb(db);
+    prefetchedToken = await getValidAccessTokenForAccount(tokenDb, accountId).catch(() => null);
+    if (!prefetchedToken) {
+      tokenLookupFailed = true;
+    } else {
+      const bufferBeforeMs = (settings.buffer_before_minutes || 0) * 60 * 1000;
+      const bufferAfterMs = (settings.buffer_after_minutes || 0) * 60 * 1000;
+      const gBusy = await queryGoogleBusyPeriods(
+        prefetchedToken,
+        new Date(start.getTime() - bufferAfterMs).toISOString(),
+        new Date(end.getTime() + bufferBeforeMs).toISOString(),
+        calendarId,
+      );
+      if (
+        gBusy.success &&
+        hasConflict(
+          start,
+          end,
+          gBusy.busy,
+          settings.buffer_before_minutes || 0,
+          settings.buffer_after_minutes || 0,
+        )
+      ) {
+        return {
+          success: false,
+          error: 'SLOT_UNAVAILABLE',
+          message: 'The requested time slot conflicts with an existing Google Calendar event. Please choose another time.',
+        };
+      }
+    }
+  }
+
+  // Honest meeting link resolution:
+  // If native booking (no Google Calendar), only use explicitly configured default_meeting_link.
+  const nativeMeetingLink = settings.default_meeting_link || null;
 
   // 1. Atomic database booking RPC
   const { data: rpcRes, error: rpcErr } = await db.rpc('book_meeting_atomically', {
@@ -118,34 +201,36 @@ export async function bookMeeting(
     return result;
   }
 
+  // Guard against duplicate Google Calendar event creation on idempotent replay
+  if (result.is_idempotent_replay) {
+    return {
+      ...result,
+      success: true,
+      meeting_id: result.meeting_id,
+      status: result.status || 'confirmed',
+      start_time: result.start_time || start.toISOString(),
+      end_time: result.end_time || end.toISOString(),
+      meeting_link: result.meeting_link ?? nativeMeetingLink,
+      is_idempotent_replay: true,
+    };
+  }
+
   let finalMeetingLink = nativeMeetingLink;
   let calendarProvider: 'native' | 'google_calendar' = 'native';
   let calendarEventId: string | null = null;
   let syncStatus: 'synced' | 'pending' | 'failed' | 'local_only' = 'local_only';
+  const extraMetadata: Record<string, unknown> = {};
 
   // 2. Google Calendar sync if enabled
   if (settings.google_calendar_enabled) {
     try {
-      let tokenDb = db;
-      try {
-        const { supabaseAdmin } = await import('@/lib/ai/admin-client');
-        tokenDb = supabaseAdmin();
-      } catch {
-        // fallback to db in test environments
-      }
-
-      const { data: rawTokens } = await tokenDb
-        .from('scheduling_settings')
-        .select('google_calendar_tokens')
-        .eq('account_id', accountId)
-        .maybeSingle();
-
-      if (rawTokens?.google_calendar_tokens) {
-        const tokens = decryptGoogleTokens(rawTokens.google_calendar_tokens);
-        const validToken = tokens ? await getValidAccessToken(tokens) : null;
-
-        if (validToken) {
-          const gEvent = await createGoogleCalendarEvent(validToken, {
+      if (tokenLookupFailed || !prefetchedToken) {
+        syncStatus = 'failed';
+        extraMetadata.calendar_sync_error = 'Google Calendar authorization expired or unavailable';
+      } else {
+        const gEvent = await createGoogleCalendarEvent(
+          prefetchedToken,
+          {
             title,
             description: `${description || ''}\n\nLead Summary:\n${leadSummary || 'N/A'}\nService: ${serviceRequested || 'General Discovery'}`,
             startTime: start.toISOString(),
@@ -153,36 +238,46 @@ export async function bookMeeting(
             timezone: tz,
             attendeeEmail,
             attendeeName,
-          });
+          },
+          calendarId,
+        );
 
-          if (gEvent) {
-            calendarProvider = 'google_calendar';
-            calendarEventId = gEvent.eventId;
-            syncStatus = 'synced';
-            if (gEvent.meetLink) {
-              finalMeetingLink = gEvent.meetLink;
-            }
-          } else {
-            syncStatus = 'failed';
+        if (gEvent) {
+          calendarProvider = 'google_calendar';
+          calendarEventId = gEvent.eventId;
+          syncStatus = 'synced';
+          extraMetadata.calendar_id = calendarId;
+          if (gEvent.meetLink) {
+            finalMeetingLink = gEvent.meetLink;
           }
+        } else {
+          syncStatus = 'failed';
+          extraMetadata.calendar_sync_error = 'Failed to create Google Calendar event';
         }
       }
     } catch (gErr) {
       console.warn('[booking] Google Calendar sync exception (continuing native):', gErr);
       syncStatus = 'failed';
+      extraMetadata.calendar_sync_error =
+        gErr instanceof Error ? gErr.message : 'Google Calendar sync exception';
     }
   }
 
-  // Update meeting with final calendar metadata
+  // Update meeting with final calendar metadata (preserving any existing metadata)
+  const updatePayload: Record<string, unknown> = {
+    meeting_link: finalMeetingLink,
+    calendar_provider: calendarProvider,
+    calendar_event_id: calendarEventId,
+    calendar_sync_status: syncStatus,
+    status: 'confirmed',
+  };
+  if (Object.keys(extraMetadata).length > 0) {
+    updatePayload.metadata = extraMetadata;
+  }
+
   await db
     .from('meetings')
-    .update({
-      meeting_link: finalMeetingLink,
-      calendar_provider: calendarProvider,
-      calendar_event_id: calendarEventId,
-      calendar_sync_status: syncStatus,
-      status: 'confirmed',
-    })
+    .update(updatePayload)
     .eq('id', result.meeting_id);
 
   return {
@@ -198,12 +293,14 @@ export async function bookMeeting(
 
 /**
  * Reschedule an existing meeting to a new time slot.
+ * Checks past-time, working hours, Google Calendar busy intervals, and DB overlap,
+ * then updates both the local meeting record and any linked Google Calendar event.
  */
 export async function rescheduleMeeting(
   db: SupabaseClient,
   args: RescheduleMeetingArgs,
 ): Promise<{ success: boolean; error?: string; meeting?: Meeting }> {
-  const { meetingId, accountId, newStartTime, newEndTime, timezone, rescheduleReason } = args;
+  const { meetingId, accountId, newStartTime, newEndTime, timezone, rescheduleReason, referenceDate } = args;
 
   const { data: meeting, error: mErr } = await db
     .from('meetings')
@@ -216,6 +313,13 @@ export async function rescheduleMeeting(
     return { success: false, error: 'Meeting not found' };
   }
 
+  if (meeting.status === 'cancelled' || meeting.status === 'completed') {
+    return {
+      success: false,
+      error: `Cannot reschedule a ${meeting.status} meeting.`,
+    };
+  }
+
   const start = typeof newStartTime === 'string' ? new Date(newStartTime) : newStartTime;
   let end: Date;
   if (newEndTime) {
@@ -224,12 +328,17 @@ export async function rescheduleMeeting(
     end = new Date(start.getTime() + (meeting.duration_minutes || 15) * 60 * 1000);
   }
 
-  // Verify availability excluding this meeting
-  const { data: isAvail } = await db.rpc('is_slot_available', {
-    p_account_id: accountId,
-    p_start_time: start.toISOString(),
-    p_end_time: end.toISOString(),
-    p_exclude_meeting_id: meetingId,
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start) {
+    return { success: false, error: 'Invalid reschedule start or end time.' };
+  }
+
+  const settings = await loadSchedulingSettings(db, accountId);
+
+  // Verify availability across working hours, Google Calendar, and database excluding this meeting
+  const isAvail = await isSlotAvailable(db, accountId, start, end, {
+    excludeMeetingId: meetingId,
+    referenceDate,
+    settings,
   });
 
   if (!isAvail) {
@@ -239,20 +348,78 @@ export async function rescheduleMeeting(
     };
   }
 
-  // Update meeting in DB
+  const targetTimezone = timezone || meeting.timezone || settings.timezone || 'Asia/Kolkata';
+
+  // Sync reschedule with Google Calendar if this meeting is linked to a Google Calendar event
+  let syncStatus: Meeting['calendar_sync_status'] = meeting.calendar_sync_status || 'local_only';
+  let syncedMeetLink: string | null = meeting.meeting_link || null;
+  let syncErrorMsg: string | undefined;
+
+  if (meeting.calendar_event_id && meeting.calendar_provider === 'google_calendar') {
+    try {
+      const tokenDb = await resolveTokenDb(db);
+      const validToken = await getValidAccessTokenForAccount(tokenDb, accountId).catch(() => null);
+      if (!validToken) {
+        syncStatus = 'failed';
+        syncErrorMsg = 'Google Calendar authorization expired or unavailable during reschedule';
+      } else {
+        const calId =
+          typeof meeting.metadata?.calendar_id === 'string'
+            ? meeting.metadata.calendar_id
+            : settings.google_calendar_calendar_id || 'primary';
+
+        const gUpdated = await updateGoogleCalendarEvent(
+          validToken,
+          meeting.calendar_event_id,
+          {
+            startTime: start.toISOString(),
+            endTime: end.toISOString(),
+            timezone: targetTimezone,
+            title: meeting.title,
+            description: meeting.description || undefined,
+          },
+          calId,
+        );
+
+        if (gUpdated) {
+          syncStatus = 'synced';
+          if (gUpdated.meetLink && !syncedMeetLink) {
+            syncedMeetLink = gUpdated.meetLink;
+          }
+        } else {
+          syncStatus = 'failed';
+          syncErrorMsg = 'Failed to update Google Calendar event';
+        }
+      }
+    } catch (gErr) {
+      syncStatus = 'failed';
+      syncErrorMsg = gErr instanceof Error ? gErr.message : 'Google Calendar update exception';
+    }
+  }
+
+  const updatedMetadata: Record<string, unknown> = {
+    ...(meeting.metadata || {}),
+    rescheduled_from: meeting.start_time,
+    rescheduled_at: new Date().toISOString(),
+    reschedule_reason: rescheduleReason || null,
+  };
+  if (syncErrorMsg) {
+    updatedMetadata.calendar_sync_error = syncErrorMsg;
+  } else {
+    delete updatedMetadata.calendar_sync_error;
+  }
+
+  // Update meeting in DB preserving local history even if Google Calendar sync failed
   const { data: updated, error: uErr } = await db
     .from('meetings')
     .update({
       start_time: start.toISOString(),
       end_time: end.toISOString(),
-      timezone: timezone || meeting.timezone,
+      timezone: targetTimezone,
       status: 'rescheduled',
-      metadata: {
-        ...(meeting.metadata || {}),
-        rescheduled_from: meeting.start_time,
-        rescheduled_at: new Date().toISOString(),
-        reschedule_reason: rescheduleReason || null,
-      },
+      meeting_link: syncedMeetLink,
+      calendar_sync_status: syncStatus,
+      metadata: updatedMetadata,
       updated_at: new Date().toISOString(),
     })
     .eq('id', meetingId)
@@ -278,7 +445,7 @@ export async function rescheduleMeeting(
 }
 
 /**
- * Cancel a meeting.
+ * Cancel a meeting while preserving local database history and removing any linked Google Calendar event.
  */
 export async function cancelMeeting(
   db: SupabaseClient,
@@ -297,7 +464,7 @@ export async function cancelMeeting(
     return { success: false, error: 'Meeting not found' };
   }
 
-  // Update meeting status
+  // Update local meeting status first so local history is preserved
   const { error: uErr } = await db
     .from('meetings')
     .update({
@@ -313,30 +480,31 @@ export async function cancelMeeting(
 
   // Clean up Google Calendar event if exists
   if (meeting.calendar_event_id && meeting.calendar_provider === 'google_calendar') {
+    let deleteSucceeded = false;
     try {
-      let tokenDb = db;
-      try {
-        const { supabaseAdmin } = await import('@/lib/ai/admin-client');
-        tokenDb = supabaseAdmin();
-      } catch {
-        // fallback to db in test environments
-      }
-
-      const { data: rawTokens } = await tokenDb
-        .from('scheduling_settings')
-        .select('google_calendar_tokens')
-        .eq('account_id', accountId)
-        .maybeSingle();
-
-      if (rawTokens?.google_calendar_tokens) {
-        const tokens = decryptGoogleTokens(rawTokens.google_calendar_tokens);
-        const validToken = tokens ? await getValidAccessToken(tokens) : null;
-        if (validToken) {
-          await deleteGoogleCalendarEvent(validToken, meeting.calendar_event_id);
-        }
+      const tokenDb = await resolveTokenDb(db);
+      const validToken = await getValidAccessTokenForAccount(tokenDb, accountId).catch(() => null);
+      if (validToken) {
+        const settings = await loadSchedulingSettings(db, accountId).catch(() => null);
+        const calId =
+          typeof meeting.metadata?.calendar_id === 'string'
+            ? meeting.metadata.calendar_id
+            : settings?.google_calendar_calendar_id || 'primary';
+        deleteSucceeded = await deleteGoogleCalendarEvent(validToken, meeting.calendar_event_id, calId);
       }
     } catch (gErr) {
-      console.warn('[booking] Google Calendar delete failed (ignoring):', gErr);
+      console.warn('[booking] Google Calendar delete failed (preserving local cancellation):', gErr);
+      deleteSucceeded = false;
+    }
+
+    if (!deleteSucceeded) {
+      await db
+        .from('meetings')
+        .update({
+          calendar_sync_status: 'failed',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', meetingId);
     }
   }
 

@@ -1,28 +1,33 @@
 import { NextResponse } from 'next/server';
 import { requireRole, toErrorResponse } from '@/lib/auth/account';
+import { createGoogleOAuthState } from '@/lib/scheduling/google-calendar';
 
 export async function GET(request: Request) {
   try {
     const ctx = await requireRole('admin');
 
-    const clientId = process.env.GOOGLE_CLIENT_ID;
-    if (!clientId) {
+    const clientId = process.env.GOOGLE_CLIENT_ID?.trim();
+    const clientSecret = process.env.GOOGLE_CLIENT_SECRET?.trim();
+    if (!clientId || !clientSecret) {
       return NextResponse.json(
-        { error: 'GOOGLE_CLIENT_ID is not configured in environment variables' },
+        { error: 'GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET is not configured in platform environment variables' },
         { status: 400 },
       );
     }
 
     const { origin } = new URL(request.url);
-    const redirectUri = `${origin}/api/meetings/google/callback`;
+    const appUrl = (
+      process.env.NEXT_PUBLIC_APP_URL?.trim() ||
+      process.env.NEXT_PUBLIC_SITE_URL?.trim() ||
+      origin
+    ).replace(/\/+$/, '');
+    const redirectUri = `${appUrl}/api/meetings/google/callback`;
 
-    const state = Buffer.from(
-      JSON.stringify({
-        accountId: ctx.accountId,
-        userId: ctx.userId,
-        timestamp: Date.now(),
-      }),
-    ).toString('base64url');
+    // Generate tamper-proof AES-256-GCM encrypted state bound to tenant accountId & initiating userId
+    const { state, nonce } = createGoogleOAuthState({
+      accountId: ctx.accountId,
+      userId: ctx.userId,
+    });
 
     const scopes = [
       'https://www.googleapis.com/auth/calendar.events',
@@ -41,7 +46,19 @@ export async function GET(request: Request) {
     });
 
     const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
-    return NextResponse.json({ url: authUrl });
+
+    const res = NextResponse.json({ url: authUrl });
+
+    // Set anti-CSRF / account-linking nonce cookie (HttpOnly, SameSite=Lax)
+    res.cookies.set('google_oauth_nonce', nonce, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      path: '/',
+      maxAge: 15 * 60, // 15 minutes
+    });
+
+    return res;
   } catch (err) {
     return toErrorResponse(err);
   }

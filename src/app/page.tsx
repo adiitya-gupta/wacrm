@@ -732,6 +732,9 @@ export default function HomePage() {
             <a href="#features" className="hover:text-foreground transition-colors">Features</a>
             <a href="#use-cases" className="hover:text-foreground transition-colors">Use Cases</a>
             <a href="#security" className="hover:text-foreground transition-colors">Architecture</a>
+            <Link href="/pricing" className="hover:text-foreground transition-colors">Pricing</Link>
+            <Link href="/privacy-policy" className="hover:text-foreground transition-colors">Privacy Policy</Link>
+            <Link href="/terms-of-service" className="hover:text-foreground transition-colors">Terms of Service</Link>
             <Link href="/login" className="hover:text-foreground transition-colors">Sign In</Link>
             <Link href="/login" className="hover:text-foreground transition-colors">Get Started</Link>
           </div>

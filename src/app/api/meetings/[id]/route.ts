@@ -41,7 +41,7 @@ export async function PATCH(request: Request, context: RouteContext) {
     const { id } = await context.params;
     const body = await request.json();
 
-    const { startTime, endTime, timezone, rescheduleReason, status } = body;
+    const { startTime, endTime, durationMinutes, timezone, rescheduleReason, status } = body;
 
     // Status-only update (e.g. mark completed or no_show)
     if (status && !startTime) {
@@ -64,19 +64,28 @@ export async function PATCH(request: Request, context: RouteContext) {
 
     // Reschedule flow
     if (startTime) {
+      let resolvedEndTime = endTime;
+      if (!resolvedEndTime && typeof durationMinutes === 'number' && durationMinutes > 0) {
+        const startMs = new Date(startTime).getTime();
+        if (!Number.isNaN(startMs)) {
+          resolvedEndTime = new Date(startMs + durationMinutes * 60 * 1000).toISOString();
+        }
+      }
+
       const result = await rescheduleMeeting(ctx.supabase, {
         meetingId: id,
         accountId: ctx.accountId,
         newStartTime: startTime,
-        newEndTime: endTime,
+        newEndTime: resolvedEndTime,
         timezone,
         rescheduleReason,
       });
 
       if (!result.success) {
+        const errStatus = result.error === 'Meeting not found' ? 404 : 409;
         return NextResponse.json(
           { error: result.error || 'Reschedule failed' },
-          { status: 409 },
+          { status: errStatus },
         );
       }
 
@@ -94,7 +103,13 @@ export async function DELETE(request: Request, context: RouteContext) {
     const ctx = await requireRole('agent');
     const { id } = await context.params;
     const { searchParams } = new URL(request.url);
-    const reason = searchParams.get('reason') || 'Cancelled by agent';
+    const body = await request.json().catch(() => null);
+    const bodyReason =
+      body && typeof body.reason === 'string' && body.reason.trim()
+        ? body.reason.trim()
+        : undefined;
+    const queryReason = searchParams.get('reason')?.trim() || undefined;
+    const reason = queryReason || bodyReason || 'Cancelled by agent';
 
     const result = await cancelMeeting(ctx.supabase, {
       meetingId: id,
@@ -103,9 +118,10 @@ export async function DELETE(request: Request, context: RouteContext) {
     });
 
     if (!result.success) {
+      const errStatus = result.error === 'Meeting not found' ? 404 : 400;
       return NextResponse.json(
         { error: result.error || 'Cancellation failed' },
-        { status: 400 },
+        { status: errStatus },
       );
     }
 

@@ -110,6 +110,41 @@ export default function MeetingsPage() {
   const [cancelReason, setCancelReason] = useState('');
   const [submittingCancel, setSubmittingCancel] = useState(false);
 
+  // Settings form state (editable Availability Rules)
+  const [settingsForm, setSettingsForm] = useState({
+    workingHoursStart: '09:00',
+    workingHoursEnd: '18:00',
+    meetingDurationMinutes: 15,
+    minimumNoticeHours: 2,
+    bufferAfterMinutes: 10,
+    timezone: 'Asia/Kolkata',
+    defaultMeetingLink: '',
+  });
+  const [savingSettings, setSavingSettings] = useState(false);
+
+  // Google Calendar list & disconnect state
+  const [googleCalendars, setGoogleCalendars] = useState<Array<{ id: string; summary: string; primary?: boolean }>>([]);
+  const [loadingCalendars, setLoadingCalendars] = useState(false);
+  const [selectedCalendarId, setSelectedCalendarId] = useState<string>('primary');
+  const [disconnectingGoogle, setDisconnectingGoogle] = useState(false);
+
+  const fetchGoogleCalendars = useCallback(async () => {
+    setLoadingCalendars(true);
+    try {
+      const res = await fetch('/api/meetings/google/calendars');
+      if (res.ok) {
+        const data = await res.json();
+        if (data.connected && Array.isArray(data.calendars)) {
+          setGoogleCalendars(data.calendars);
+        }
+      }
+    } catch (err) {
+      console.warn('Failed to load Google calendars:', err);
+    } finally {
+      setLoadingCalendars(false);
+    }
+  }, []);
+
   // Check URL notifications (e.g. connected=google)
   useEffect(() => {
     const connected = searchParams.get('connected');
@@ -137,12 +172,30 @@ export default function MeetingsPage() {
       const settingsRes = await fetch('/api/meetings/settings');
       if (settingsRes.ok) {
         const settingsData = await settingsRes.json();
-        setSettings(settingsData.settings || null);
-        if (settingsData.settings?.meeting_duration_minutes) {
-          setCreateForm((f) => ({
-            ...f,
-            durationMinutes: settingsData.settings.meeting_duration_minutes,
-          }));
+        const s = settingsData.settings || null;
+        setSettings(s);
+        if (s) {
+          setSelectedCalendarId(s.google_calendar_calendar_id || 'primary');
+          if (s.google_calendar_enabled && s.google_calendar_status !== 'expired' && s.google_calendar_status !== 'error') {
+            fetchGoogleCalendars();
+          } else {
+            setGoogleCalendars([]);
+          }
+          setSettingsForm({
+            workingHoursStart: s.working_hours_start || '09:00',
+            workingHoursEnd: s.working_hours_end || '18:00',
+            meetingDurationMinutes: s.meeting_duration_minutes || 15,
+            minimumNoticeHours: s.minimum_notice_hours ?? 2,
+            bufferAfterMinutes: s.buffer_after_minutes ?? 10,
+            timezone: s.timezone || 'Asia/Kolkata',
+            defaultMeetingLink: s.default_meeting_link || '',
+          });
+          if (s.meeting_duration_minutes) {
+            setCreateForm((f) => ({
+              ...f,
+              durationMinutes: s.meeting_duration_minutes,
+            }));
+          }
         }
       }
 
@@ -163,7 +216,7 @@ export default function MeetingsPage() {
     } finally {
       setLoading(false);
     }
-  }, [accountId, supabase]);
+  }, [accountId, supabase, fetchGoogleCalendars]);
 
   useEffect(() => {
     fetchData();
@@ -350,6 +403,23 @@ export default function MeetingsPage() {
     }
   };
 
+  // Auto-fetch calendars when settings modal opens and Google Calendar is active
+  useEffect(() => {
+    if (
+      settingsModalOpen &&
+      settings?.google_calendar_enabled &&
+      settings?.google_calendar_status !== 'expired' &&
+      settings?.google_calendar_status !== 'error'
+    ) {
+      fetchGoogleCalendars();
+    }
+  }, [
+    settingsModalOpen,
+    settings?.google_calendar_enabled,
+    settings?.google_calendar_status,
+    fetchGoogleCalendars,
+  ]);
+
   // Handle Connect Google Calendar
   const handleConnectGoogle = async () => {
     try {
@@ -358,10 +428,92 @@ export default function MeetingsPage() {
       if (data.url) {
         window.location.href = data.url;
       } else {
-        toast.error(data.error || 'Failed to start Google OAuth');
+        const errMsg = data.error || 'Failed to start Google OAuth';
+        if (errMsg.includes('GOOGLE_CLIENT_ID')) {
+          toast.error(
+            'Google Calendar integration requires platform setup. The system administrator must configure GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in the deployment environment.',
+            { duration: 6000 }
+          );
+        } else {
+          toast.error(errMsg);
+        }
       }
     } catch {
       toast.error('Failed to initialize Google authentication');
+    }
+  };
+
+  const handleSelectCalendar = async (calId: string) => {
+    setSelectedCalendarId(calId);
+    try {
+      const res = await fetch('/api/meetings/google/calendar', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ calendarId: calId }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to update calendar selection');
+      }
+      toast.success('Calendar selection updated successfully');
+      setSettings((prev) => (prev ? { ...prev, google_calendar_calendar_id: calId } : null));
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to update calendar');
+    }
+  };
+
+  const handleDisconnectGoogle = async () => {
+    if (
+      !confirm(
+        'Are you sure you want to disconnect Google Calendar? External conflicts will no longer be checked and automatic Google Meet links will be disabled.'
+      )
+    ) {
+      return;
+    }
+    setDisconnectingGoogle(true);
+    try {
+      const res = await fetch('/api/meetings/google', { method: 'DELETE' });
+      const data = await res.json();
+      if (res.ok) {
+        setGoogleCalendars([]);
+        setSelectedCalendarId('primary');
+        toast.success(data.message || 'Google Calendar disconnected');
+        fetchData();
+      } else {
+        toast.error(data.error || 'Failed to disconnect Google Calendar');
+      }
+    } catch {
+      toast.error('Failed to disconnect Google Calendar');
+    } finally {
+      setDisconnectingGoogle(false);
+    }
+  };
+
+  // Handle Save Availability Rules
+  const handleSaveSettings = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSavingSettings(true);
+    try {
+      const res = await fetch('/api/meetings/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(settingsForm),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to save availability rules');
+      }
+      toast.success('Availability rules saved!');
+      if (data.settings) {
+        setSettings(data.settings);
+      }
+      setSettingsModalOpen(false);
+      fetchData();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to save rules';
+      toast.error(msg);
+    } finally {
+      setSavingSettings(false);
     }
   };
 
@@ -405,25 +557,86 @@ export default function MeetingsPage() {
 
   return (
     <div className="flex-1 space-y-6 p-6">
-      {/* Top Banner / Google Calendar Status */}
-      {settings?.google_calendar_enabled ? (
-        <div className="flex items-center justify-between rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
-          <div className="flex items-center gap-2.5">
-            <span className="flex h-2 w-2 rounded-full bg-emerald-600 animate-pulse" />
-            <p>
-              <strong className="font-semibold text-emerald-950">Google Calendar Connected:</strong>{' '}
-              Synchronized with {settings.google_calendar_email || 'primary calendar'}. Google Meet
-              links are automatically generated for all WhatsApp AI & manual bookings.
-            </p>
+      {/* Top Banner / Google Calendar & Availability Status */}
+      {settings?.google_calendar_enabled &&
+      settings?.google_calendar_status !== 'expired' &&
+      settings?.google_calendar_status !== 'error' ? (
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-950">
+          <div className="flex items-start sm:items-center gap-2.5">
+            <span className="flex h-2.5 w-2.5 rounded-full bg-emerald-600 animate-pulse mt-1 sm:mt-0 shrink-0" />
+            <div>
+              <p className="font-medium">
+                <strong className="font-semibold text-emerald-950">Google Calendar Connected:</strong>{' '}
+                Synchronized with {settings.google_calendar_email || 'Google Calendar'} (
+                {settings.google_calendar_calendar_id &&
+                settings.google_calendar_calendar_id !== 'primary'
+                  ? settings.google_calendar_calendar_id
+                  : 'Primary Calendar'}
+                ). External conflicts are checked in real time and Google Meet links are generated automatically.
+              </p>
+              <p className="text-xs text-emerald-800 mt-0.5">
+                Availability Source: Google Calendar + Native Rules ({settings.timezone || 'Asia/Kolkata'})
+              </p>
+            </div>
           </div>
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-7 text-xs border-emerald-300 text-emerald-800 hover:bg-emerald-100 bg-white"
-            onClick={() => setSettingsModalOpen(true)}
-          >
-            Configure
-          </Button>
+          <div className="flex items-center gap-2 shrink-0 self-start sm:self-auto">
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-8 text-xs border-emerald-300 text-emerald-800 hover:bg-emerald-100 bg-white"
+              onClick={() => setSettingsModalOpen(true)}
+            >
+              Availability Rules
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={disconnectingGoogle}
+              className="h-8 text-xs text-rose-700 hover:bg-rose-100/60 hover:text-rose-800"
+              onClick={handleDisconnectGoogle}
+            >
+              {disconnectingGoogle ? 'Disconnecting...' : 'Disconnect'}
+            </Button>
+          </div>
+        </div>
+      ) : settings?.google_calendar_status === 'expired' ||
+        settings?.google_calendar_status === 'error' ? (
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border border-rose-200 bg-rose-50/80 px-4 py-3 text-sm text-rose-950">
+          <div className="flex items-start sm:items-center gap-2.5">
+            <span className="flex h-2.5 w-2.5 rounded-full bg-rose-600 mt-1 sm:mt-0 shrink-0" />
+            <div>
+              <p className="font-medium">
+                <strong className="font-semibold text-rose-950">
+                  {settings?.google_calendar_status === 'error'
+                    ? 'Google Calendar Synchronization Error:'
+                    : 'Google Calendar Authorization Expired:'}
+                </strong>{' '}
+                Google access requires reconnection for{' '}
+                {settings.google_calendar_email || 'your workspace account'}.
+              </p>
+              <p className="text-xs text-rose-800 mt-0.5">
+                Reconnect your Google account to restore calendar conflict checks and Google Meet links.
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0 self-start sm:self-auto">
+            <Button
+              size="sm"
+              className="h-8 text-xs bg-rose-600 hover:bg-rose-700 text-white font-medium shadow-sm"
+              onClick={handleConnectGoogle}
+            >
+              Reconnect Google
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={disconnectingGoogle}
+              className="h-8 text-xs border-rose-300 text-rose-800 bg-white hover:bg-rose-50"
+              onClick={handleDisconnectGoogle}
+            >
+              {disconnectingGoogle ? 'Disconnecting...' : 'Disconnect'}
+            </Button>
+          </div>
         </div>
       ) : (
         <div className="flex items-center justify-between rounded-xl border border-primary/20 bg-primary-soft px-4 py-3 text-sm text-foreground">
@@ -1181,117 +1394,273 @@ export default function MeetingsPage() {
       {/* ============================================================ */}
       <Dialog open={settingsModalOpen} onOpenChange={setSettingsModalOpen}>
         <DialogContent className="max-w-lg">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <SettingsIcon className="w-5 h-5 text-primary" />
-              Availability & Scheduling Rules
-            </DialogTitle>
-            <DialogDescription>
-              Configure default meeting durations, working hours, and Google Calendar sync.
-            </DialogDescription>
-          </DialogHeader>
+          <form onSubmit={handleSaveSettings}>
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <SettingsIcon className="w-5 h-5 text-primary" />
+                Availability &amp; Scheduling Rules
+              </DialogTitle>
+              <DialogDescription>
+                Configure working hours, durations, booking notice, buffers, and Google Calendar sync.
+              </DialogDescription>
+            </DialogHeader>
 
-          <div className="space-y-4 pt-2 text-xs">
-            {/* Google Sync Status */}
-            <div className="rounded-xl border border-border/80 bg-muted/40 p-3.5 space-y-2">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h4 className="font-semibold text-foreground text-sm">Google Calendar</h4>
-                  <p className="text-muted-foreground text-xs">
-                    {settings?.google_calendar_enabled
-                      ? `Connected (${settings.google_calendar_email || 'Primary Calendar'})`
-                      : 'Not connected. Using native availability.'}
+            <div className="space-y-4 pt-3 text-xs">
+              {/* Google Sync Status */}
+              <div className="rounded-xl border border-border/80 bg-muted/40 p-3.5 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <h4 className="font-semibold text-foreground text-sm">Google Calendar Integration</h4>
+                    <p className="text-muted-foreground text-xs mt-0.5">
+                      {settings?.google_calendar_enabled &&
+                      settings?.google_calendar_status !== 'expired' &&
+                      settings?.google_calendar_status !== 'error'
+                        ? `Connected (${settings.google_calendar_email || 'Primary Calendar'}) — 2-way sync active`
+                        : settings?.google_calendar_status === 'expired' ||
+                            settings?.google_calendar_status === 'error'
+                          ? `Authorization requires reconnection for ${settings.google_calendar_email || 'Google account'}.`
+                          : 'Not connected. Operating on native availability rules.'}
+                    </p>
+                  </div>
+                  {settings?.google_calendar_enabled &&
+                  settings?.google_calendar_status !== 'expired' &&
+                  settings?.google_calendar_status !== 'error' ? (
+                    <div className="flex items-center gap-2 shrink-0">
+                      <Badge variant="success">Active</Badge>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        disabled={disconnectingGoogle}
+                        className="h-7 text-xs text-rose-600 hover:text-rose-700 border-rose-200"
+                        onClick={handleDisconnectGoogle}
+                      >
+                        {disconnectingGoogle ? 'Disconnecting...' : 'Disconnect'}
+                      </Button>
+                    </div>
+                  ) : settings?.google_calendar_status === 'expired' ||
+                    settings?.google_calendar_status === 'error' ? (
+                    <div className="flex items-center gap-2 shrink-0">
+                      <Badge variant="error">
+                        {settings?.google_calendar_status === 'error' ? 'Error' : 'Expired'}
+                      </Badge>
+                      <Button
+                        type="button"
+                        size="sm"
+                        className="h-7 text-xs bg-primary hover:bg-primary/90"
+                        onClick={handleConnectGoogle}
+                      >
+                        Reconnect
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        disabled={disconnectingGoogle}
+                        className="h-7 text-xs text-rose-600 hover:text-rose-700 border-rose-200"
+                        onClick={handleDisconnectGoogle}
+                      >
+                        Disconnect
+                      </Button>
+                    </div>
+                  ) : (
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="h-8 text-xs bg-primary hover:bg-primary/90"
+                      onClick={handleConnectGoogle}
+                    >
+                      Connect
+                    </Button>
+                  )}
+                </div>
+
+                {settings?.google_calendar_enabled &&
+                  settings?.google_calendar_status !== 'expired' &&
+                  settings?.google_calendar_status !== 'error' && (
+                    <div className="pt-2.5 mt-2 border-t border-border/50 space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <Label className="text-xs font-medium text-foreground">Synchronized Calendar</Label>
+                        {loadingCalendars && (
+                          <span className="text-[10px] text-muted-foreground animate-pulse">
+                            Loading calendars...
+                          </span>
+                        )}
+                      </div>
+                      <select
+                        value={selectedCalendarId}
+                        disabled={loadingCalendars}
+                        onChange={(e) => handleSelectCalendar(e.target.value)}
+                        className="w-full h-8 text-xs rounded-md border border-input bg-background px-2.5 py-1 text-foreground shadow-sm focus:outline-none focus:ring-1 focus:ring-ring"
+                      >
+                        {googleCalendars.length > 0 ? (
+                          googleCalendars.map((cal) => (
+                            <option key={cal.id} value={cal.id}>
+                              {cal.summary} {cal.primary ? '(Primary)' : ''}
+                            </option>
+                          ))
+                        ) : (
+                          <option value={selectedCalendarId || 'primary'}>
+                            {selectedCalendarId === 'primary' ? 'Primary Calendar' : selectedCalendarId}
+                          </option>
+                        )}
+                      </select>
+                      <p className="text-[11px] text-muted-foreground">
+                        Meetings booked via WhatsApp AI and manual scheduling sync directly with this calendar. External events on this calendar block booking slots.
+                      </p>
+                    </div>
+                  )}
+              </div>
+
+              {/* Timezone */}
+              <div className="space-y-1.5">
+                <Label className="text-xs">Business Timezone</Label>
+                <Input
+                  value={settingsForm.timezone}
+                  onChange={(e) => setSettingsForm((f) => ({ ...f, timezone: e.target.value }))}
+                  className="h-9 text-xs"
+                />
+                <p className="text-[11px] text-muted-foreground">
+                  IANA timezone (e.g. Asia/Kolkata). Customer slots are computed and formatted in this timezone.
+                </p>
+              </div>
+
+              {/* Working Hours & Duration */}
+              <div className="grid grid-cols-3 gap-3">
+                <div className="space-y-1.5">
+                  <Label className="text-xs">Start Hour</Label>
+                  <Input
+                    type="time"
+                    value={settingsForm.workingHoursStart}
+                    onChange={(e) =>
+                      setSettingsForm((f) => ({ ...f, workingHoursStart: e.target.value }))
+                    }
+                    className="h-9 text-xs"
+                    required
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs">End Hour</Label>
+                  <Input
+                    type="time"
+                    value={settingsForm.workingHoursEnd}
+                    onChange={(e) =>
+                      setSettingsForm((f) => ({ ...f, workingHoursEnd: e.target.value }))
+                    }
+                    className="h-9 text-xs"
+                    required
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs">Duration (mins)</Label>
+                  <Input
+                    type="number"
+                    min="5"
+                    max="180"
+                    step="5"
+                    value={settingsForm.meetingDurationMinutes}
+                    onChange={(e) =>
+                      setSettingsForm((f) => ({
+                        ...f,
+                        meetingDurationMinutes: parseInt(e.target.value, 10) || 15,
+                      }))
+                    }
+                    className="h-9 text-xs"
+                    required
+                  />
+                </div>
+              </div>
+
+              {/* Notice & Buffers */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label className="text-xs">Minimum Notice (hours)</Label>
+                  <Input
+                    type="number"
+                    min="0"
+                    max="72"
+                    value={settingsForm.minimumNoticeHours}
+                    onChange={(e) =>
+                      setSettingsForm((f) => ({
+                        ...f,
+                        minimumNoticeHours: parseInt(e.target.value, 10) || 0,
+                      }))
+                    }
+                    className="h-9 text-xs"
+                    required
+                  />
+                  <p className="text-[11px] text-muted-foreground">
+                    Prevents booking slots too close to current time.
                   </p>
                 </div>
-                {settings?.google_calendar_enabled ? (
-                  <Badge variant="success">
-                    Active
-                  </Badge>
+                <div className="space-y-1.5">
+                  <Label className="text-xs">Buffer After Meeting (mins)</Label>
+                  <Input
+                    type="number"
+                    min="0"
+                    max="60"
+                    step="5"
+                    value={settingsForm.bufferAfterMinutes}
+                    onChange={(e) =>
+                      setSettingsForm((f) => ({
+                        ...f,
+                        bufferAfterMinutes: parseInt(e.target.value, 10) || 0,
+                      }))
+                    }
+                    className="h-9 text-xs"
+                    required
+                  />
+                  <p className="text-[11px] text-muted-foreground">
+                    Rest buffer between consecutive appointments.
+                  </p>
+                </div>
+              </div>
+
+              {/* Default Meeting Link */}
+              <div className="space-y-1.5">
+                <Label className="text-xs">Default Meeting Link (Native Bookings)</Label>
+                <Input
+                  type="text"
+                  placeholder="e.g. https://meet.google.com/your-room or https://zoom.us/j/..."
+                  value={settingsForm.defaultMeetingLink}
+                  onChange={(e) =>
+                    setSettingsForm((f) => ({ ...f, defaultMeetingLink: e.target.value }))
+                  }
+                  className="h-9 text-xs"
+                />
+                <p className="text-[11px] text-muted-foreground">
+                  Used for native bookings when Google Calendar is not connected.
+                </p>
+              </div>
+            </div>
+
+            <DialogFooter className="pt-4">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => setSettingsModalOpen(false)}
+                disabled={savingSettings}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                size="sm"
+                className="bg-primary hover:bg-primary/90 text-primary-foreground font-medium"
+                disabled={savingSettings}
+              >
+                {savingSettings ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin mr-1.5" />
+                    Saving...
+                  </>
                 ) : (
-                  <Button
-                    size="sm"
-                    className="h-8 text-xs bg-primary hover:bg-primary/90"
-                    onClick={handleConnectGoogle}
-                  >
-                    Connect
-                  </Button>
+                  'Save Changes'
                 )}
-              </div>
-            </div>
-
-            {/* Timezone */}
-            <div className="space-y-1.5">
-              <Label className="text-xs">Default Timezone</Label>
-              <Input
-                value={settings?.timezone || 'Asia/Kolkata'}
-                disabled
-                className="h-9 text-xs bg-muted/50"
-              />
-              <p className="text-[11px] text-muted-foreground">
-                India Standard Time (IST, UTC+05:30). International slots are converted
-                automatically.
-              </p>
-            </div>
-
-            {/* Working Hours & Duration */}
-            <div className="grid grid-cols-3 gap-3">
-              <div className="space-y-1.5">
-                <Label className="text-xs">Start Hour</Label>
-                <Input
-                  value={settings?.working_hours_start || '09:00'}
-                  disabled
-                  className="h-9 text-xs bg-muted/50"
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label className="text-xs">End Hour</Label>
-                <Input
-                  value={settings?.working_hours_end || '18:00'}
-                  disabled
-                  className="h-9 text-xs bg-muted/50"
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label className="text-xs">Duration</Label>
-                <Input
-                  value={`${settings?.meeting_duration_minutes || 15} mins`}
-                  disabled
-                  className="h-9 text-xs bg-muted/50"
-                />
-              </div>
-            </div>
-
-            {/* Notice & Buffers */}
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1.5">
-                <Label className="text-xs">Min. Notice</Label>
-                <Input
-                  value={`${settings?.minimum_notice_hours || 2} hours`}
-                  disabled
-                  className="h-9 text-xs bg-muted/50"
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label className="text-xs">Meeting Buffer</Label>
-                <Input
-                  value={`${settings?.buffer_after_minutes || 10} minutes`}
-                  disabled
-                  className="h-9 text-xs bg-muted/50"
-                />
-              </div>
-            </div>
-          </div>
-
-          <DialogFooter className="pt-2">
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={() => setSettingsModalOpen(false)}
-            >
-              Close
-            </Button>
-          </DialogFooter>
+              </Button>
+            </DialogFooter>
+          </form>
         </DialogContent>
       </Dialog>
     </div>

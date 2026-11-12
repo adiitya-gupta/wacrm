@@ -32,6 +32,7 @@ export async function PUT(request: Request) {
       maxAdvanceDays,
       defaultMeetingLink,
       googleCalendarEnabled,
+      googleCalendarCalendarId,
     } = body;
 
     const payload: Record<string, unknown> = {
@@ -50,6 +51,9 @@ export async function PUT(request: Request) {
     if (maxAdvanceDays !== undefined) payload.max_advance_days = maxAdvanceDays;
     if (defaultMeetingLink !== undefined) payload.default_meeting_link = defaultMeetingLink;
     if (googleCalendarEnabled !== undefined) payload.google_calendar_enabled = googleCalendarEnabled;
+    if (typeof googleCalendarCalendarId === 'string' && googleCalendarCalendarId.trim()) {
+      payload.google_calendar_calendar_id = googleCalendarCalendarId.trim();
+    }
 
     const { data: updated, error } = await ctx.supabase
       .from('scheduling_settings')

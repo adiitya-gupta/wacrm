@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { DEFAULT_PLANS } from '@/lib/billing/plans';
+import { LegalFooter } from '@/components/legal/legal-footer';
 
 export default function PricingPage() {
   const plans = [
@@ -194,6 +195,8 @@ export default function PricingPage() {
           </div>
         </div>
       </main>
+
+      <LegalFooter />
     </div>
   );
 }

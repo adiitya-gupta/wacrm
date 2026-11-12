@@ -1,9 +1,8 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { SchedulingSettings, TimeSlot } from '@/types/meetings';
 import {
-  getValidAccessToken,
+  getValidAccessTokenForAccount,
   queryGoogleBusyPeriods,
-  decryptGoogleTokens,
 } from './google-calendar';
 
 export const DEFAULT_SCHEDULING_SETTINGS: Omit<SchedulingSettings, 'account_id'> = {
@@ -18,11 +17,14 @@ export const DEFAULT_SCHEDULING_SETTINGS: Omit<SchedulingSettings, 'account_id'>
   max_advance_days: 14,
   google_calendar_enabled: false,
   google_calendar_email: null,
+  google_calendar_status: 'disconnected',
+  google_calendar_account_id: null,
+  google_calendar_calendar_id: 'primary',
   default_meeting_link: 'https://meet.google.com/new',
 };
 
 export const SCHEDULING_SETTINGS_PUBLIC_COLUMNS =
-  'id, account_id, meeting_duration_minutes, working_days, working_hours_start, working_hours_end, timezone, buffer_before_minutes, buffer_after_minutes, minimum_notice_hours, max_advance_days, google_calendar_enabled, google_calendar_email, default_meeting_link, created_at, updated_at';
+  'id, account_id, meeting_duration_minutes, working_days, working_hours_start, working_hours_end, timezone, buffer_before_minutes, buffer_after_minutes, minimum_notice_hours, max_advance_days, google_calendar_enabled, google_calendar_email, google_calendar_status, google_calendar_account_id, google_calendar_calendar_id, default_meeting_link, created_at, updated_at';
 
 /**
  * Load scheduling settings for an account, creating or returning defaults if missing.
@@ -56,6 +58,11 @@ export async function loadSchedulingSettings(
       max_advance_days: data.max_advance_days ?? 14,
       google_calendar_enabled: Boolean(data.google_calendar_enabled),
       google_calendar_email: data.google_calendar_email ?? null,
+      google_calendar_status:
+        (data.google_calendar_status as SchedulingSettings['google_calendar_status']) ||
+        (data.google_calendar_enabled ? 'connected' : 'disconnected'),
+      google_calendar_account_id: data.google_calendar_account_id ?? null,
+      google_calendar_calendar_id: data.google_calendar_calendar_id ?? 'primary',
       default_meeting_link: data.default_meeting_link ?? null,
       created_at: data.created_at,
       updated_at: data.updated_at,
@@ -78,10 +85,11 @@ export async function getAvailableSlots(
     startDate?: Date;
     daysCount?: number;
     limit?: number;
+    referenceDate?: Date;
   } = {},
 ): Promise<TimeSlot[]> {
   const settings = await loadSchedulingSettings(db, accountId);
-  const now = new Date();
+  const now = options.referenceDate || new Date();
   const start = options.startDate && options.startDate > now ? options.startDate : now;
   const days = Math.min(options.daysCount || 7, settings.max_advance_days || 14);
   const limit = options.limit || 6;
@@ -124,28 +132,33 @@ export async function getAvailableSlots(
       // fallback to db in test environments
     }
 
-    const { data: rawRow } = await tokenDb
-      .from('scheduling_settings')
-      .select('google_calendar_tokens')
-      .eq('account_id', accountId)
-      .maybeSingle();
+    const validToken = await getValidAccessTokenForAccount(tokenDb, accountId).catch(() => null);
+    if (!validToken) {
+      console.warn(
+        `[scheduling] Google Calendar is enabled for account ${accountId} but no valid access token could be obtained.`,
+      );
+      return [];
+    }
 
-    const tokens = decryptGoogleTokens(rawRow?.google_calendar_tokens);
-    if (tokens) {
-      const validToken = await getValidAccessToken(tokens);
-      if (validToken) {
-        const gBusy = await queryGoogleBusyPeriods(
-          validToken,
-          queryRangeStart.toISOString(),
-          queryRangeEnd.toISOString(),
-        );
-        for (const b of gBusy) {
-          bookedRanges.push({
-            start: new Date(b.start).getTime(),
-            end: new Date(b.end).getTime(),
-          });
-        }
-      }
+    const gBusyRes = await queryGoogleBusyPeriods(
+      validToken,
+      queryRangeStart.toISOString(),
+      queryRangeEnd.toISOString(),
+      settings.google_calendar_calendar_id || 'primary',
+    );
+
+    if (!gBusyRes.success) {
+      console.warn(
+        `[scheduling] Google Calendar freeBusy query failed for account ${accountId}: ${gBusyRes.error}`,
+      );
+      return [];
+    }
+
+    for (const b of gBusyRes.busy) {
+      bookedRanges.push({
+        start: new Date(b.start).getTime(),
+        end: new Date(b.end).getTime(),
+      });
     }
   }
 
@@ -161,19 +174,97 @@ export async function getAvailableSlots(
 }
 
 /**
- * Check if a slot falls within configured working days and working hours.
+ * Helper: Extract year, month, day, weekday, hour, minute in a specified timezone.
+ */
+export interface ZonedDateParts {
+  year: number;
+  month: number; // 1-12
+  day: number;
+  weekday: string; // 'Mon', 'Tue', etc.
+  hour: number;
+  minute: number;
+  second: number;
+}
+
+export function getZonedParts(date: Date, timeZone: string = 'Asia/Kolkata'): ZonedDateParts {
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+    weekday: 'short',
+    hour: 'numeric',
+    minute: 'numeric',
+    second: 'numeric',
+    hour12: false,
+  });
+  const parts = formatter.formatToParts(date);
+  const map: Record<string, string> = {};
+  for (const p of parts) {
+    map[p.type] = p.value;
+  }
+  let hour = parseInt(map.hour || '0', 10);
+  if (hour === 24) hour = 0;
+  return {
+    year: parseInt(map.year, 10),
+    month: parseInt(map.month, 10),
+    day: parseInt(map.day, 10),
+    weekday: map.weekday || 'Mon',
+    hour,
+    minute: parseInt(map.minute || '0', 10),
+    second: parseInt(map.second || '0', 10),
+  };
+}
+
+/**
+ * Helper: Convert a target calendar time in a specific timezone to a UTC Date.
+ */
+export function zonedTimeToUtc(
+  year: number,
+  month: number, // 1-12
+  day: number,
+  hour: number,
+  minute: number,
+  second: number = 0,
+  timeZone: string = 'Asia/Kolkata',
+): Date {
+  const desiredUtcMs = Date.UTC(year, month - 1, day, hour, minute, second);
+  const approx = new Date(desiredUtcMs);
+  const p1 = getZonedParts(approx, timeZone);
+  const p1Ms = Date.UTC(p1.year, p1.month - 1, p1.day, p1.hour, p1.minute, p1.second);
+  const offsetMs = p1Ms - desiredUtcMs;
+  let exact = new Date(approx.getTime() - offsetMs);
+
+  // DST boundary check
+  const p2 = getZonedParts(exact, timeZone);
+  const p2Ms = Date.UTC(p2.year, p2.month - 1, p2.day, p2.hour, p2.minute, p2.second);
+  if (p2Ms !== desiredUtcMs) {
+    exact = new Date(exact.getTime() - (p2Ms - desiredUtcMs));
+  }
+  return exact;
+}
+
+/**
+ * Check if a slot falls within configured working days and working hours in the business timezone.
  */
 export function isSlotWithinWorkingHours(
   slotDate: Date,
   durationMinutes: number,
   settings: SchedulingSettings,
 ): boolean {
-  // Convert slot date to settings timezone string representation
-  const dStr = slotDate.toLocaleString('en-US', { timeZone: settings.timezone });
-  const localDate = new Date(dStr);
+  const tz = settings.timezone || 'Asia/Kolkata';
+  const parts = getZonedParts(slotDate, tz);
 
-  let dayOfWeek = localDate.getDay();
-  if (dayOfWeek === 0) dayOfWeek = 7; // 1=Mon, 7=Sun
+  const weekdayMap: Record<string, number> = {
+    Mon: 1,
+    Tue: 2,
+    Wed: 3,
+    Thu: 4,
+    Fri: 5,
+    Sat: 6,
+    Sun: 7,
+  };
+  const dayOfWeek = weekdayMap[parts.weekday] ?? 1;
 
   if (!settings.working_days.includes(dayOfWeek)) {
     return false;
@@ -182,9 +273,7 @@ export function isSlotWithinWorkingHours(
   const [startHour, startMin] = settings.working_hours_start.split(':').map(Number);
   const [endHour, endMin] = settings.working_hours_end.split(':').map(Number);
 
-  const slotHour = localDate.getHours();
-  const slotMin = localDate.getMinutes();
-  const slotTotalMin = slotHour * 60 + slotMin;
+  const slotTotalMin = parts.hour * 60 + parts.minute;
   const startTotalMin = startHour * 60 + startMin;
   const endTotalMin = endHour * 60 + endMin;
 
@@ -220,6 +309,7 @@ export function hasConflict(
 
 /**
  * Pure slot generator taking settings and busy periods.
+ * Uses business timezone to construct days and excludes past slots.
  */
 export function generateAvailableSlots(options: {
   settings: SchedulingSettings;
@@ -238,6 +328,7 @@ export function generateAvailableSlots(options: {
     maxSlots = 6,
   } = options;
 
+  const tz = settings.timezone || 'Asia/Kolkata';
   const now = referenceDate;
   const earliestAllowed = new Date(
     now.getTime() + (settings.minimum_notice_hours || 0) * 60 * 60 * 1000
@@ -253,33 +344,58 @@ export function generateAvailableSlots(options: {
   const allBusy = [...bookedPeriods, ...googleBusyPeriods];
   const availableSlots: TimeSlot[] = [];
 
+  const weekdayMap: Record<string, number> = {
+    Mon: 1,
+    Tue: 2,
+    Wed: 3,
+    Thu: 4,
+    Fri: 5,
+    Sat: 6,
+    Sun: 7,
+  };
+
+  const zonedNow = getZonedParts(now, tz);
+
   for (let d = 0; d < daysCount; d++) {
     if (availableSlots.length >= maxSlots) break;
 
-    const currentDay = new Date(referenceDate);
-    currentDay.setDate(currentDay.getDate() + d);
-
-    let dayOfWeek = currentDay.getDay();
-    if (dayOfWeek === 0) dayOfWeek = 7;
+    // Advance calendar day in the target timezone
+    const baseDay = new Date(Date.UTC(zonedNow.year, zonedNow.month - 1, zonedNow.day + d, 12, 0, 0));
+    const dayParts = getZonedParts(baseDay, tz);
+    const dayOfWeek = weekdayMap[dayParts.weekday] ?? 1;
 
     if (!settings.working_days.includes(dayOfWeek)) {
       continue;
     }
 
-    const dayStart = new Date(currentDay);
-    dayStart.setHours(startHour, startMin, 0, 0);
+    const dayStartUtc = zonedTimeToUtc(
+      dayParts.year,
+      dayParts.month,
+      dayParts.day,
+      startHour,
+      startMin,
+      0,
+      tz
+    );
+    const dayEndUtc = zonedTimeToUtc(
+      dayParts.year,
+      dayParts.month,
+      dayParts.day,
+      endHour,
+      endMin,
+      0,
+      tz
+    );
 
-    const dayEnd = new Date(currentDay);
-    dayEnd.setHours(endHour, endMin, 0, 0);
+    let currentSlotStart = new Date(dayStartUtc);
 
-    let currentSlotStart = new Date(dayStart);
-
-    while (currentSlotStart.getTime() + durationMs <= dayEnd.getTime()) {
+    while (currentSlotStart.getTime() + durationMs <= dayEndUtc.getTime()) {
       if (availableSlots.length >= maxSlots) break;
 
       const currentSlotEnd = new Date(currentSlotStart.getTime() + durationMs);
 
-      if (currentSlotStart.getTime() >= earliestAllowed.getTime()) {
+      // Must be strictly after current time plus minimum notice (never at or before)
+      if (currentSlotStart.getTime() > earliestAllowed.getTime()) {
         const conflict = hasConflict(
           currentSlotStart,
           currentSlotEnd,
@@ -292,9 +408,9 @@ export function generateAvailableSlots(options: {
           availableSlots.push({
             startTime: currentSlotStart.toISOString(),
             endTime: currentSlotEnd.toISOString(),
-            formattedDate: formatDatePretty(currentSlotStart),
-            formattedTime: formatTimePretty(currentSlotStart),
-            timezone: settings.timezone,
+            formattedDate: formatDatePretty(currentSlotStart, tz),
+            formattedTime: formatTimePretty(currentSlotStart, tz),
+            timezone: tz,
           });
         }
       }
@@ -307,17 +423,87 @@ export function generateAvailableSlots(options: {
 }
 
 /**
- * Verify whether a specific slot is free for an account.
+ * Verify whether a specific slot is free for an account, checking:
+ * 1. Not in the past
+ * 2. Within working hours and working days
+ * 3. Not overlapping with Google Calendar (if enabled), including configured buffers
+ * 4. Not overlapping with existing database meetings
  */
 export async function isSlotAvailable(
   db: SupabaseClient,
   accountId: string,
   startTime: Date | string,
   endTime: Date | string,
-  excludeMeetingId?: string,
+  options?: string | {
+    excludeMeetingId?: string;
+    referenceDate?: Date;
+    settings?: SchedulingSettings;
+  },
 ): Promise<boolean> {
-  const startIso = typeof startTime === 'string' ? startTime : startTime.toISOString();
-  const endIso = typeof endTime === 'string' ? endTime : endTime.toISOString();
+  const excludeMeetingId = typeof options === 'string' ? options : options?.excludeMeetingId;
+  const referenceDate = typeof options === 'object' ? options?.referenceDate : undefined;
+  const passedSettings = typeof options === 'object' ? options?.settings : undefined;
+
+  const start = typeof startTime === 'string' ? new Date(startTime) : startTime;
+  const end = typeof endTime === 'string' ? new Date(endTime) : endTime;
+  const now = referenceDate || new Date();
+
+  // 1. Slot cannot be at or before now, and end must be after start
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start || start.getTime() <= now.getTime()) {
+    return false;
+  }
+
+  // 2. Settings check for working hours
+  const settings = passedSettings || (await loadSchedulingSettings(db, accountId));
+  const durationMinutes = Math.round((end.getTime() - start.getTime()) / (60 * 1000));
+  if (!isSlotWithinWorkingHours(start, durationMinutes, settings)) {
+    return false;
+  }
+
+  // 3. Google Calendar check if enabled
+  if (settings.google_calendar_enabled) {
+    let tokenDb = db;
+    try {
+      const { supabaseAdmin } = await import('@/lib/ai/admin-client');
+      tokenDb = supabaseAdmin();
+    } catch {
+      // test fallback
+    }
+
+    const validToken = await getValidAccessTokenForAccount(tokenDb, accountId).catch(() => null);
+    if (!validToken) {
+      return false;
+    }
+
+    const bufferBeforeMs = (settings.buffer_before_minutes || 0) * 60 * 1000;
+    const bufferAfterMs = (settings.buffer_after_minutes || 0) * 60 * 1000;
+    const checkMin = new Date(start.getTime() - bufferAfterMs).toISOString();
+    const checkMax = new Date(end.getTime() + bufferBeforeMs).toISOString();
+
+    const gRes = await queryGoogleBusyPeriods(
+      validToken,
+      checkMin,
+      checkMax,
+      settings.google_calendar_calendar_id || 'primary',
+    );
+    if (!gRes.success) {
+      return false;
+    }
+    if (
+      hasConflict(
+        start,
+        end,
+        gRes.busy,
+        settings.buffer_before_minutes || 0,
+        settings.buffer_after_minutes || 0,
+      )
+    ) {
+      return false;
+    }
+  }
+
+  const startIso = start.toISOString();
+  const endIso = end.toISOString();
 
   const { data, error } = await db.rpc('is_slot_available', {
     p_account_id: accountId,
@@ -339,7 +525,7 @@ export async function isSlotAvailable(
  */
 export function formatSlotsForWhatsApp(slots: TimeSlot[]): string {
   if (slots.length === 0) {
-    return 'No slots available in the next few days. Please let us know a custom time that suits you.';
+    return 'We do not have any open slots in the next few days that match our working hours. Please suggest a preferred date and time, and our team will do our best to accommodate you!';
   }
 
   const list = slots
@@ -349,19 +535,21 @@ export function formatSlotsForWhatsApp(slots: TimeSlot[]): string {
     )
     .join('\n');
 
-  return `${list}\n\nPlease reply with the number of your preferred slot, or suggest another time that works for you!`;
+  return `${list}\n\nPlease reply with the number of your preferred slot, or suggest another date and time that works for you!`;
 }
 
-function formatDatePretty(d: Date): string {
+export function formatDatePretty(d: Date, timeZone: string = 'Asia/Kolkata'): string {
   return d.toLocaleDateString('en-US', {
+    timeZone,
     weekday: 'short',
     month: 'short',
     day: 'numeric',
   });
 }
 
-function formatTimePretty(d: Date): string {
+export function formatTimePretty(d: Date, timeZone: string = 'Asia/Kolkata'): string {
   return d.toLocaleTimeString('en-US', {
+    timeZone,
     hour: 'numeric',
     minute: '2-digit',
     hour12: true,

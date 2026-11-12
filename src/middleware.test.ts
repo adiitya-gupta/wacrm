@@ -173,4 +173,13 @@ describe("middleware — root URL auth parameter forwarding", () => {
     const res = await middleware(new NextRequest("https://app.test/"));
     expect(res.headers.get("location")).toBeNull();
   });
+
+  it.each(["/privacy-policy", "/terms-of-service", "/pricing"])(
+    "permits unauthenticated access to public compliance and marketing route %s without redirect",
+    async (path) => {
+      mockUser = null;
+      const res = await middleware(new NextRequest(`https://app.test${path}`));
+      expect(res.headers.get("location")).toBeNull();
+    },
+  );
 });

@@ -49,6 +49,12 @@ export interface Meeting {
   };
 }
 
+export type GoogleCalendarStatus =
+  | "connected"
+  | "disconnected"
+  | "expired"
+  | "error";
+
 export interface SchedulingSettings {
   id?: string;
   account_id: string;
@@ -63,6 +69,9 @@ export interface SchedulingSettings {
   max_advance_days: number;
   google_calendar_enabled: boolean;
   google_calendar_email: string | null;
+  google_calendar_status?: GoogleCalendarStatus;
+  google_calendar_account_id?: string | null;
+  google_calendar_calendar_id?: string;
   default_meeting_link: string | null;
   created_at?: string;
   updated_at?: string;

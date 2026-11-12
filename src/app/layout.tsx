@@ -39,6 +39,9 @@ const metadata: Metadata = {
     address: false,
     telephone: false,
   },
+  verification: {
+    google: "sejNa-FDwdTcxWUI7jSAcgB2qim-VoE3Hn8Ou3_l8LU",
+  },
 };
 
 export const viewport: Viewport = {
